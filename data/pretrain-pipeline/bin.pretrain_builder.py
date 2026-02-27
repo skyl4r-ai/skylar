@@ -762,10 +762,10 @@ def build(
         ),
         # ── Docling format toggles ─────────────────────────────────
         docling_formats: str = typer.Option(
-            "pdf", "--docling-formats",
+            "pdf,html", "--docling-formats",
             help=(
                     "Comma-separated formats to process with Docling "
-                    "(e.g., pdf,docx). Empty string disables Docling."
+                    "(e.g., pdf,html). Empty string disables Docling."
             ),
         ),
         no_docling: bool = typer.Option(

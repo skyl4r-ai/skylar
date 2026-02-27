@@ -629,15 +629,9 @@ class DoclingHTMLExtractor:
 
         self.docs_processed += 1
 
-        text = result.document.export_to_markdown(
-            image_placeholder="",
-            escape_underscores=False,
-        )
+        text = result.document.export_to_text()
         if not text or not text.strip():
             return
-
-        # Clean residual markdown artifacts
-        text = self._MD_IMAGE_PLACEHOLDER.sub("", text)
 
         if text and text.strip():
             yield str(path), text
