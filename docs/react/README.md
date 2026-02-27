@@ -1,0 +1,1 @@
+npx esbuild interact-tuner-entry.jsx --bundle --outfile=interact-tuner.js --jsx=automatic

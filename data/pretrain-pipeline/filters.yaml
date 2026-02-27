@@ -1,0 +1,52 @@
+# ──────────────────────────────────────────────────────────────────
+# Pipeline configuration for pretrain_builder
+# Pass with:  python pretrain_builder.py tiny --config filters.yaml
+# ──────────────────────────────────────────────────────────────────
+
+# ── PII removal ────────────────────────────────────────────────────
+# Replaces matches with placeholder tokens: <EMAIL>, <PHONE>, etc.
+pii_enabled: true
+pii_email: true
+pii_phone: true
+pii_codice_fiscale: true
+pii_partita_iva: true
+pii_iban: true
+pii_ip_address: true
+pii_credit_card: true
+
+# ── Quality filters ────────────────────────────────────────────────
+quality_enabled: true
+min_doc_chars: 100          # drop very short docs
+max_doc_chars: 500000       # drop extremely long docs
+min_word_count: 20
+max_word_count: 100000
+max_uppercase_ratio: 0.4    # fraction of alpha chars that are upper
+max_special_char_ratio: 0.3 # fraction of chars that are special
+min_mean_word_length: 2.0   # catches "a b c d e f" garbage
+max_mean_word_length: 20.0  # catches base64/encoded blobs
+max_line_dup_ratio: 0.5     # repeated lines within a document
+max_paragraph_dup_ratio: 0.3
+min_compression_ratio: 0.10 # zlib ratio — too low = random noise
+max_compression_ratio: 0.90 # too high = very repetitive
+max_boilerplate_ratio: 0.5  # Italian web boilerplate patterns
+max_bullet_ratio: 0.7       # bullet-point-only docs
+max_ellipsis_ratio: 0.3     # "..." spam
+
+# ── Spam / blacklist ───────────────────────────────────────────────
+spam_enabled: true
+max_url_density: 0.10       # fraction of words that are URLs
+# blacklist_domains_path: ./blacklist_domains.txt
+# blacklist_keywords_path: ./blacklist_keywords.txt
+
+# ── Exact dedup ────────────────────────────────────────────────────
+# xxhash-64 based — O(1) per doc, ~50 bytes RAM/doc
+exact_dedup_enabled: true
+
+# ── Near dedup (MinHash LSH) ──────────────────────────────────────
+# Jaccard similarity threshold — 0.8 is standard for web crawls
+# num_perm=128 → good precision, ~2 KB/doc in LSH index
+# Reduce to 64 for lower RAM on very large corpora (>50M docs)
+near_dedup_enabled: true
+near_dedup_threshold: 0.80
+near_dedup_num_perm: 128
+near_dedup_ngram_size: 5
