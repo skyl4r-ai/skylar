@@ -717,7 +717,7 @@ class JSONExtractor:
 
     def extract(self, path: Path) -> DocStream:
         try:
-            raw = path.read_text(encoding="utf-8", errors="replace")
+            raw = path.read_bytes().replace(b"\x00", b"").decode("utf-8", errors="replace")
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
             logger.warning("Invalid JSON in %s: %s", path, exc)
