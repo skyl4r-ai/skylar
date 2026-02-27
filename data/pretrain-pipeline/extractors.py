@@ -629,7 +629,7 @@ class DoclingHTMLExtractor:
 
         self.docs_processed += 1
 
-        text = result.document.export_to_text()
+        text = result.document.export_to_markdown()
         if not text or not text.strip():
             return
 
