@@ -3,7 +3,9 @@ Data quality pipeline for pre-training corpus construction.
 
 Filters
 ───────
-  • PII removal      — email, phone, codice fiscale, IBAN, IP, credit cards
+  • PII removal      — Presidio (NER-based, default) or regex fallback.
+                       Detects names, addresses, phone, email, codice fiscale,
+                       P.IVA, IBAN, IP, credit cards in Italian context.
   • Quality          — length, repetition, compression ratio, boilerplate, unicode
   • Spam / blacklist — URL density, domain blacklist, keyword / regex patterns
   • Exact dedup      — xxhash-based exact document hashing
@@ -14,6 +16,7 @@ Every filter is a standalone callable so the pipeline is fully composable.
 
 from __future__ import annotations
 
+import logging
 import re
 import zlib
 from collections import Counter
@@ -23,6 +26,8 @@ from typing import Protocol
 
 import xxhash
 from datasketch import MinHash, MinHashLSH
+
+logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────────────────
 # Config
@@ -124,10 +129,155 @@ class DocFilter(Protocol):
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  1 — PII FILTER
+#  1 — PII FILTER (Presidio-based with regex fallback)
 # ══════════════════════════════════════════════════════════════════════
 
-# Pre-compiled patterns (Italian-focused + universal)
+
+class PIIFilter:
+    """Scrub personally identifiable information using Microsoft Presidio.
+
+    Uses spaCy Italian NER model for context-aware detection of:
+      - PERSON (names)
+      - LOCATION (addresses, cities)
+      - EMAIL_ADDRESS, PHONE_NUMBER, IBAN_CODE, CREDIT_CARD, IP_ADDRESS
+      - IT_FISCAL_CODE (codice fiscale) — custom recognizer
+      - IT_VAT_CODE (partita IVA) — custom recognizer
+
+    Falls back to regex-only detection if Presidio is not installed.
+    The analyzer and anonymizer are initialized lazily on first call.
+    """
+
+    name: str = "pii"
+
+    def __init__(self, cfg: PipelineConfig) -> None:
+        self._cfg = cfg
+        self._analyzer = None
+        self._anonymizer = None
+        self._fallback: _RegexPIIFilter | None = None
+        self._use_presidio: bool | None = None  # None = not yet tried
+
+    def _init_presidio(self) -> bool:
+        """Lazy-init Presidio analyzer + anonymizer. Returns True on success."""
+        if self._use_presidio is not None:
+            return self._use_presidio
+
+        try:
+            from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern
+            from presidio_analyzer.nlp_engine import NlpEngineProvider
+            from presidio_anonymizer import AnonymizerEngine
+            from presidio_anonymizer.entities import OperatorConfig
+
+            # ── Italian spaCy NLP engine ───────────────────────────
+            nlp_config = {
+                "nlp_engine_name": "spacy",
+                "models": [
+                    {"lang_code": "it", "model_name": "it_core_news_lg"},
+                ],
+            }
+            provider = NlpEngineProvider(nlp_configuration=nlp_config)
+            nlp_engine = provider.create_engine()
+
+            # ── Custom Italian recognizers ─────────────────────────
+            cf_recognizer = PatternRecognizer(
+                supported_entity="IT_FISCAL_CODE",
+                supported_language="it",
+                patterns=[Pattern(
+                    name="codice_fiscale",
+                    regex=r"\b[A-Z]{6}[0-9]{2}[A-EHLMPRST][0-9]{2}[A-Z][0-9]{3}[A-Z]\b",
+                    score=0.95,  # high — wins over NER PERSON on CF strings
+                )],
+            )
+            piva_recognizer = PatternRecognizer(
+                supported_entity="IT_VAT_CODE",
+                supported_language="it",
+                patterns=[Pattern(
+                    name="partita_iva",
+                    regex=r"\b(?:P\.?\s*IVA\s*)?(?:IT)?[0-9]{11}\b",
+                    score=0.95,  # high — wins over NER LOCATION on IT+digits
+                )],
+                context=["partita", "iva", "p.iva", "vat"],
+            )
+
+            self._analyzer = AnalyzerEngine(
+                nlp_engine=nlp_engine,
+                supported_languages=["it"],
+            )
+            self._analyzer.registry.add_recognizer(cf_recognizer)
+            self._analyzer.registry.add_recognizer(piva_recognizer)
+
+            self._anonymizer = AnonymizerEngine()
+
+            # Mapping entity → replacement token
+            self._operators = {
+                "PERSON": OperatorConfig("replace", {"new_value": "<PERSONA>"}),
+                "LOCATION": OperatorConfig("replace", {"new_value": "<LUOGO>"}),
+                "EMAIL_ADDRESS": OperatorConfig("replace", {"new_value": "<EMAIL>"}),
+                "PHONE_NUMBER": OperatorConfig("replace", {"new_value": "<TELEFONO>"}),
+                "IBAN_CODE": OperatorConfig("replace", {"new_value": "<IBAN>"}),
+                "CREDIT_CARD": OperatorConfig("replace", {"new_value": "<CC>"}),
+                "IP_ADDRESS": OperatorConfig("replace", {"new_value": "<IP>"}),
+                "IT_FISCAL_CODE": OperatorConfig("replace", {"new_value": "<CF>"}),
+                "IT_VAT_CODE": OperatorConfig("replace", {"new_value": "<PIVA>"}),
+                "DATE_TIME": OperatorConfig("replace", {"new_value": "<DATA>"}),
+            }
+
+            self._entities = list(self._operators.keys())
+
+            self._use_presidio = True
+            logger.info("Presidio PII engine initialized (Italian NER: it_core_news_lg)")
+            return True
+
+        except ImportError:
+            logger.warning(
+                "presidio-analyzer/anonymizer not installed — "
+                "falling back to regex PII filter. "
+                "Install with: pip install presidio-analyzer presidio-anonymizer && "
+                "python -m spacy download it_core_news_lg"
+            )
+            self._use_presidio = False
+            self._fallback = _RegexPIIFilter(self._cfg)
+            return False
+
+        except Exception as exc:
+            logger.warning(
+                "Presidio init failed: %s — falling back to regex PII", exc
+            )
+            self._use_presidio = False
+            self._fallback = _RegexPIIFilter(self._cfg)
+            return False
+
+    def __call__(self, text: str) -> FilterResult:
+        if self._use_presidio is None:
+            self._init_presidio()
+
+        if not self._use_presidio:
+            return self._fallback(text)
+
+        try:
+            results = self._analyzer.analyze(
+                text=text,
+                language="it",
+                entities=self._entities,
+                score_threshold=0.4,
+            )
+
+            if not results:
+                return FilterResult.accept(text)
+
+            anonymized = self._anonymizer.anonymize(
+                text=text,
+                analyzer_results=results,
+                operators=self._operators,
+            )
+            return FilterResult.accept(anonymized.text)
+
+        except Exception as exc:
+            logger.debug("Presidio analysis failed: %s — passing text through", exc)
+            return FilterResult.accept(text)
+
+
+# ── Regex fallback (used when Presidio is not installed) ──────────────
+
 _RE_EMAIL = re.compile(
     r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Z|a-z]{2,}\b"
 )
@@ -135,8 +285,8 @@ _RE_PHONE_IT = re.compile(
     r"(?<!\d)"
     r"(?:\+39[\s\-]?)?"
     r"(?:"
-    r"3[0-9]{2}[\s\-.]?[0-9]{3}[\s\-.]?[0-9]{4}"  # cellulare
-    r"|0[0-9]{1,3}[\s\-.]?[0-9]{4,8}"  # fisso
+    r"3[0-9]{2}[\s\-.]?[0-9]{3}[\s\-.]?[0-9]{4}"
+    r"|0[0-9]{1,3}[\s\-.]?[0-9]{4,8}"
     r")"
     r"(?!\d)"
 )
@@ -154,16 +304,16 @@ _RE_IP = re.compile(
     r"(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b"
 )
 _RE_CREDIT_CARD = re.compile(
-    r"\b(?:4[0-9]{12}(?:[0-9]{3})?"  # Visa
-    r"|5[1-5][0-9]{14}"  # Mastercard
-    r"|3[47][0-9]{13}"  # Amex
-    r"|6(?:011|5[0-9]{2})[0-9]{12}"  # Discover
+    r"\b(?:4[0-9]{12}(?:[0-9]{3})?"
+    r"|5[1-5][0-9]{14}"
+    r"|3[47][0-9]{13}"
+    r"|6(?:011|5[0-9]{2})[0-9]{12}"
     r")\b"
 )
 
 _PII_PATTERNS: dict[str, tuple[re.Pattern[str], str]] = {
     "pii_email": (_RE_EMAIL, "<EMAIL>"),
-    "pii_phone": (_RE_PHONE_IT, "<PHONE>"),
+    "pii_phone": (_RE_PHONE_IT, "<TELEFONO>"),
     "pii_codice_fiscale": (_RE_CODICE_FISCALE, "<CF>"),
     "pii_partita_iva": (_RE_PARTITA_IVA, "<PIVA>"),
     "pii_iban": (_RE_IBAN_IT, "<IBAN>"),
@@ -172,8 +322,8 @@ _PII_PATTERNS: dict[str, tuple[re.Pattern[str], str]] = {
 }
 
 
-class PIIFilter:
-    """Scrub personally identifiable information, replacing with tokens."""
+class _RegexPIIFilter:
+    """Regex-only PII fallback (no NER, no context awareness)."""
 
     name: str = "pii"
 

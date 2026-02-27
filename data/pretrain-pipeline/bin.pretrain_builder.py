@@ -60,6 +60,7 @@ from cleaners import CleanerConfig, ColumnMergeConfig, ColumnMergeCleaner, Repet
 from extractors import ExtractorRegistry, discover_files
 from pipeline import Pipeline, PipelineConfig, PipelineStats
 from prose_filter import ProseConfig, ProseFilter, FilterStats as ProseStats, flatten_to_prose
+from typo_detector import TypoDetector
 
 # ──────────────────────────────────────────────────────────────────────
 # Constants
@@ -307,6 +308,7 @@ def phase1_extract_and_filter(
         max_rep_ratio: float,
         temp_dir: Path,
         max_chunk_bytes: int,
+        typo_detector: TypoDetector | None = None,
 ) -> tuple[list[Path], np.ndarray, dict[str, tuple[int, int]]]:
     """Walk source files → extract → normalize → column merge → prose filter → pipeline → temp chunks.
 
@@ -365,6 +367,10 @@ def phase1_extract_and_filter(
                         if not keep:
                             continue
 
+                        # ── Typo detection (log only) ──────────
+                        if typo_detector is not None:
+                            typo_detector.check(cleaned, source=_source)
+
                         # ── Write to temp chunk ──────────────────
                         file_idx, offset, length = writer.write_document(cleaned)
                         indices.append((file_idx, offset, length))
@@ -396,21 +402,29 @@ def phase1_extract_and_filter(
                     try:
                         for _source, text in registry.extract_and_normalize(fmt, file_path):
                             if fmt == "txt":
-                                # TXT files are already clean text — skip
-                                # column merge and prose scoring, just flatten
+                                # ── TXT: curated data (chat templates, SFT) ──
+                                # TXT files are hand-crafted and intentionally
+                                # included to teach the model chat structure
+                                # (ChatML <|im_start|>/<|im_end|>) from the
+                                # earliest pre-training steps.  They bypass ALL
+                                # filters — only MinimalNormalizer is applied.
                                 text = flatten_to_prose(text)
                                 if not text:
                                     continue
-                            else:
-                                # Full pipeline: ColumnMergeCleaner + ProseFilter
-                                if col_merge_cleaner is not None:
-                                    text = col_merge_cleaner.clean(text)
-                                    if not text:
-                                        continue
+                                file_idx, offset, length = writer.write_document(text)
+                                indices.append((file_idx, offset, length))
+                                fmt_docs += 1
+                                continue
 
-                                text = prose_filter.process(text)
+                            # Full pipeline: ColumnMergeCleaner + ProseFilter
+                            if col_merge_cleaner is not None:
+                                text = col_merge_cleaner.clean(text)
                                 if not text:
                                     continue
+
+                            text = prose_filter.process(text)
+                            if not text:
+                                continue
 
                             # ── Repetition check (pre-pipeline) ──────
                             if repetition_scorer.is_repetitive(text, max_rep_ratio):
@@ -421,6 +435,10 @@ def phase1_extract_and_filter(
                             keep, cleaned = pipe.process(text)
                             if not keep:
                                 continue
+
+                            # ── Typo detection (log only) ──────────
+                            if typo_detector is not None:
+                                typo_detector.check(cleaned, source=_source)
 
                             # ── Write to temp chunk ──────────────────
                             file_idx, offset, length = writer.write_document(cleaned)
@@ -548,6 +566,20 @@ def phase1_extract_and_filter(
 
     _print_extraction_stats(extraction_stats)
     _print_pipeline_report(pipe.stats, pipe)
+
+    # Typo detector report
+    if typo_detector is not None and typo_detector.total_checked > 0:
+        typo_detector.close()
+        console.print(
+            f"  [dim]Typo detector:[/] {typo_detector.total_suspicious:,} "
+            f"suspicious words / {typo_detector.total_checked:,} total "
+            f"({typo_detector.suspicious_ratio:.2%})"
+        )
+        if typo_detector.total_suspicious > 0:
+            console.print(
+                f"  [dim]↳[/] Review: [cyan]{typo_detector._output_path}[/]"
+            )
+        console.print()
 
     return writer.files, idx_array, extraction_stats
 
@@ -728,10 +760,22 @@ def build(
             1500.0, "--ppl-max",
             help="Max perplexity threshold (above = incoherent).",
         ),
-        # ── PDF extractor toggle ──────────────────────────────────
+        # ── Docling format toggles ─────────────────────────────────
+        docling_formats: str = typer.Option(
+            "pdf,html", "--docling-formats",
+            help=(
+                "Comma-separated formats to process with Docling "
+                "(e.g., pdf,html). Empty string disables Docling."
+            ),
+        ),
         no_docling: bool = typer.Option(
             False, "--no-docling",
-            help="Use legacy pymupdf extractor instead of Docling for PDFs.",
+            help="Disable Docling for all formats (legacy pymupdf/trafilatura).",
+        ),
+        # ── Typo detection ────────────────────────────────────────
+        typo_log: Path | None = typer.Option(
+            None, "--typo-log",
+            help="Log suspicious words (typos/OCR errors) to this CSV file for review.",
         ),
 ) -> None:
     """Build a pre-training corpus from local files."""
@@ -791,13 +835,23 @@ def build(
     )
     prose_filt = ProseFilter(prose_cfg) if not no_prose_filter else None
 
+    # ── Docling formats ────────────────────────────────────────────
+    if no_docling:
+        docling_fmt_list: list[str] = []
+    else:
+        docling_fmt_list = [
+            f.strip().lower()
+            for f in docling_formats.split(",")
+            if f.strip()
+        ]
+
     # ── Extractor registry ────────────────────────────────────────
     registry = ExtractorRegistry(
         search_keys=search_keys,
         cleaner_cfg=cleaner_cfg,
         skip_xml=actual_skip_xml,
         skip_html=skip_html,
-        use_docling=not no_docling,
+        docling_formats=docling_fmt_list,
     )
 
     # ── Banner ────────────────────────────────────────────────────
@@ -806,8 +860,11 @@ def build(
     banner.add_row("[bold]Output", str(output.resolve()))
     banner.add_row("[bold]Max chunk", _fmt_bytes(max_chunk_bytes))
     banner.add_row("[bold]Seed", str(seed))
-    pdf_ext_label = "[green]Docling (GPU)[/]" if not no_docling else "[yellow]pymupdf (legacy)[/]"
-    banner.add_row("[bold]PDF extractor", pdf_ext_label)
+    if docling_fmt_list:
+        docling_label = ", ".join(f.upper() for f in docling_fmt_list)
+        banner.add_row("[bold]Docling formats", f"[green]{docling_label}[/]")
+    else:
+        banner.add_row("[bold]Docling", "[yellow]disabled (legacy)[/]")
     banner.add_row("[bold]Format", f"{BOS_TOKEN}text{EOS_TOKEN}")
     banner.add_row(
         "[bold]Search keys",
@@ -875,6 +932,9 @@ def build(
     if prose_filt is None:
         prose_filt = _PassthroughProseFilter()
 
+    # ── Typo detector (optional) ─────────────────────────────
+    typo_det = TypoDetector(typo_log) if typo_log else None
+
     temp_files, indices, extraction_stats = phase1_extract_and_filter(
         file_map=file_map,
         registry=registry,
@@ -885,6 +945,7 @@ def build(
         max_rep_ratio=max_rep_ratio,
         temp_dir=temp_dir,
         max_chunk_bytes=max_chunk_bytes,
+        typo_detector=typo_det,
     )
 
     if len(indices) == 0:

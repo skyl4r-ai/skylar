@@ -1,11 +1,16 @@
 """
 Text cleaning and normalization for pre-training corpus construction.
 
-Four main components
+Five main components
 ────────────────────
-  • TextNormalizer     — universal text cleanup (encoding, unicode, whitespace,
-                        punctuation, control chars, leader dots, short-line
-                        removal).  Applied to every extracted document.
+  • MinimalNormalizer  — lightweight text cleanup for text that is already
+                        reasonably clean (e.g. Docling output).  Only does:
+                        encoding fix (ftfy), NFKC, zero-width/control char
+                        removal, multi-space collapse, newline normalization.
+                        Does NOT touch content structure, legal text, page
+                        numbers, hyphenation, list markers, or short lines.
+  • TextNormalizer     — (legacy) aggressive text cleanup.  Kept for backward
+                        compatibility but no longer used by default.
   • PDFCleaner         — PDF-specific post-extraction cleanup (header/footer
                         detection across pages, hyphenation repair, paragraph
                         merge for reflowed text).
@@ -60,17 +65,10 @@ _ZERO_WIDTH = re.compile(
     r"\u2060\u2061-\u2064\ufeff\ufffe\u00ad]"
 )
 
-# Repeated punctuation
+# Repeated punctuation (only dots — markdown syntax like ###, ---, ~~~, *** preserved)
 _REPEATED_DOTS = re.compile(r"\.{4,}")
-_REPEATED_DASHES = re.compile(r"\-{3,}")
-_REPEATED_UNDERSCORES = re.compile(r"_{3,}")
-_REPEATED_EQUALS = re.compile(r"={3,}")
-_REPEATED_STARS = re.compile(r"\*{3,}")
-_REPEATED_TILDES = re.compile(r"~{3,}")
-_REPEATED_HASHES = re.compile(r"#{3,}")
 
 # Whitespace
-_MULTI_SPACES = re.compile(r"[^\S\n]{2,}")
 _MULTI_NEWLINES = re.compile(r"\n{3,}")
 _TRAILING_SPACES = re.compile(r"[ \t]+$", re.MULTILINE)
 
@@ -101,7 +99,61 @@ _TAB_RUNS = re.compile(r"\t{2,}")
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  TEXT NORMALIZER
+#  MINIMAL NORMALIZER (default for Docling output)
+# ══════════════════════════════════════════════════════════════════════
+
+# Collapse 2+ spaces into one (but NOT leading whitespace — preserves indentation)
+_MULTI_SPACES = re.compile(r"(?<=\S) {2,}")
+
+
+class MinimalNormalizer:
+    """Lightweight text normalizer for already-clean extractor output.
+
+    Docling and modern extractors produce reasonably clean text.
+    This normalizer only fixes encoding-level issues without
+    touching document structure or content:
+
+      1. ftfy encoding repair + NFKC unicode normalization
+      2. Remove zero-width / invisible characters
+      3. Remove non-printable control chars (keep newline, tab)
+      4. Collapse multiple spaces between words into one
+      5. Normalize CR → LF
+      6. Cap consecutive blank lines at 2
+      7. Strip trailing whitespace per line
+    """
+
+    def __call__(self, text: str) -> str:
+        if not text or not text.strip():
+            return ""
+
+        # ── 1. Encoding repair + NFKC ─────────────────────────────
+        text = ftfy.fix_text(text, normalization="NFKC")
+
+        # ── 2. Zero-width / invisible characters ──────────────────
+        text = _ZERO_WIDTH.sub("", text)
+
+        # ── 3. Non-printable control chars (keep \n \t) ───────────
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        text = _FORM_FEED.sub("\n", text)
+        text = "".join(
+            ch for ch in text
+            if ch in ("\n", "\t") or not unicodedata.category(ch).startswith("C")
+        )
+
+        # ── 4. Collapse multiple spaces between words ─────────────
+        text = _MULTI_SPACES.sub(" ", text)
+
+        # ── 5. Trailing whitespace per line ────────────────────────
+        text = _TRAILING_SPACES.sub("", text)
+
+        # ── 6. Cap consecutive blank lines ─────────────────────────
+        text = _MULTI_NEWLINES.sub("\n\n", text)
+
+        return text.strip()
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  TEXT NORMALIZER (legacy — aggressive, no longer used by default)
 # ══════════════════════════════════════════════════════════════════════
 
 
@@ -153,17 +205,12 @@ class TextNormalizer:
             text = _HYPHEN_BREAK.sub(r"\1\2", text)
 
         # ── 6. Repeated punctuation → single symbol ──────────────
+        # Only collapse dots (4+); preserve markdown syntax:
+        # ### headings, --- rules, ~~~ fences, *** separators, etc.
         text = _REPEATED_DOTS.sub("…", text)
-        text = _REPEATED_DASHES.sub("—", text)
-        text = _REPEATED_UNDERSCORES.sub("", text)
-        text = _REPEATED_EQUALS.sub("", text)
-        text = _REPEATED_STARS.sub("", text)
-        text = _REPEATED_TILDES.sub("", text)
-        text = _REPEATED_HASHES.sub("", text)
 
         # ── 7. Whitespace normalization ───────────────────────────
         text = _TRAILING_SPACES.sub("", text)
-        text = _MULTI_SPACES.sub(" ", text)
         text = _MULTI_NEWLINES.sub("\n\n", text)
 
         # ── 8. Remove artifact lines ─────────────────────────────

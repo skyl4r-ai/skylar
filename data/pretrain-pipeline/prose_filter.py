@@ -390,48 +390,38 @@ def _score_chunk(text: str, cfg: ProseConfig) -> ChunkScore:
 #  PROSE FLATTENER
 # ══════════════════════════════════════════════════════════════════════
 
-# Patterns for flattening
-_MULTI_SPACE = re.compile(r"[^\S\n]+")
-_MULTI_NL = re.compile(r"\n{2,}")
-_LEADING_TRAILING_NL = re.compile(r"^\n+|\n+$")
-_ORPHAN_NEWLINE = re.compile(r"(?<=[^\n])\n(?=[^\n])")
+# Patterns for cleanup
+_MULTI_NL = re.compile(r"\n{3,}")
 
 
 def flatten_to_prose(text: str) -> str:
-    """Collapse text into clean flowing prose for pre-training.
+    """Minimal cleanup preserving original text structure.
 
     Rules
     ─────
-      • Lines within a paragraph → joined with single space
-      • Paragraph boundaries (double newline) → single newline
-      • No leading/trailing whitespace on any line
-      • No multiple consecutive spaces
-      • No tabs, no carriage returns
-      • Result: continuous text, paragraphs separated by ``\\n``
+      • Normalize CR → LF
+      • Cap consecutive blank lines at 2
+      • Strip trailing whitespace per line
+      • Preserve indentation, markdown formatting, list structure
 
-    This ensures the model learns to generate coherent flowing text,
-    not random whitespace patterns or column alignments.
+    The content keeps its original form (markdown tables, indented
+    lists, code blocks, etc.) so that the output is readable and
+    structurally faithful to the source.
     """
     if not text:
         return ""
 
-    # Normalize CR, tabs → spaces
-    text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\t", " ")
+    # Normalize CR
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
 
-    # Split into paragraphs (double-newline boundaries)
-    paragraphs: list[str] = []
-    for block in re.split(r"\n\s*\n", text):
-        # Within each paragraph: join lines, collapse spaces
-        lines = block.split("\n")
-        joined = " ".join(ln.strip() for ln in lines if ln.strip())
-        joined = _MULTI_SPACE.sub(" ", joined).strip()
-        if joined:
-            paragraphs.append(joined)
+    # Strip trailing whitespace per line, preserve leading
+    lines = [ln.rstrip() for ln in text.split("\n")]
+    text = "\n".join(lines)
 
-    # Join paragraphs with single newline
-    result = "\n".join(paragraphs)
+    # Cap consecutive blank lines at 2 (i.e. max one empty line between blocks)
+    text = _MULTI_NL.sub("\n\n", text)
 
-    return result.strip()
+    return text.strip()
 
 
 def _merge_small_chunks(chunks: list[str], min_words: int = 15) -> list[str]:

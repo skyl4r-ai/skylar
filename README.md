@@ -214,7 +214,13 @@ skylar/
 │   ├── bin.tokenizer.py           #   BPE tokenizer training + sharding
 │   ├── bin.sft_data_to_jsonl.py   #   SFT data converter
 │   ├── bin.sft_data_shaffle.py    #   Shuffle utility
-│   └── bin.sft_synthetic_data.py  #   Agentic synthetic data generator
+│   ├── bin.sft_synthetic_data.py  #   Agentic synthetic data generator
+│   └── pretrain-pipeline/         #   Pre-training corpus builder
+│       ├── bin.pretrain_builder.py #     CLI: extract → clean → filter → dedup → shuffle
+│       ├── extractors.py          #     PDF (Docling GPU) / HTML / JSON / TXT / XML
+│       ├── cleaners.py            #     MinimalNormalizer, ColumnMergeCleaner
+│       ├── prose_filter.py        #     Heuristic + GPU perplexity scoring
+│       └── pipeline.py            #     PII (Presidio NER), Quality, Spam, Dedup
 │
 ├── 🏋️ training/                    # Training loops
 │   ├── bin.pretrain.py            #   Pre-training (Stage 1)
@@ -411,11 +417,66 @@ python data/bin.tokenizer.py \
 
 **Special tokens:**
 
+
+
 ```
 <pad>  <bos>  <eos>  <|im_start|>  <|im_end|>
 <think>  </think>  <tool_call>  </tool_call>
 <tool_response>  </tool_response>
 ```
+
+<br>
+
+## 🛡️ Pre-Training Data Pipeline
+
+The `data/pretrain-pipeline/` module transforms raw documents (PDF, HTML, JSON, TXT) into a clean, shuffled, deduplicated corpus ready for tokenization. Built for **Italian legal/institutional text** (EUR-Lex, Gazzetta Ufficiale, Banca d'Italia).
+
+```bash
+python data/pretrain-pipeline/bin.pretrain_builder.py /path/to/raw_documents \
+  -o .datasets/pretokenized \
+  --max-gb 5 \
+  --gpu-perplexity
+```
+
+```
+ Raw files (PDF/HTML/JSON/TXT)
+      │
+      ├──── TXT (chat templates) ──── bypass all filters ──┐
+      │     Curated ChatML data included as-is to teach     │
+      │     the model <|im_start|>/<|im_end|> structure     │
+      │     from the earliest pre-training steps.           │
+      │                                                     │
+      ▼                                                     │
+ 1. Extraction        Docling (GPU) / trafilatura / JSON    │
+      │                                                     │
+      ▼                                                     │
+ 2. Normalization     MinimalNormalizer — ftfy, NFKC         │
+      │                                                     │
+      ▼                                                     │
+ 3. Column Merge      Broken two-column PDF detection        │
+      │                                                     │
+      ▼                                                     │
+ 4. Prose Filter      Semantic chunking + scoring + PPL      │
+      │                                                     │
+      ▼                                                     │
+ 5. PII Redaction     Presidio NER (Italian)                 │
+      │                 Names → <PERSONA>                    │
+      │                 Email → <EMAIL>  Phone → <TELEFONO>  │
+      │                 CF → <CF>  IBAN → <IBAN>  CC → <CC>  │
+      │                                                     │
+      ▼                                                     │
+ 6. Quality + Spam + Dedup                                   │
+      │                                                     │
+      ▼                                                     ▼
+ 7. Shuffle + Write   Global shuffle → <bos>doc<eos> output chunks
+```
+
+| Component       | Technology                          | Purpose                            |
+|:----------------|:------------------------------------|:-----------------------------------|
+| PDF Extraction  | Docling (GPU) + pymupdf fallback    | Layout-aware reading order         |
+| PII Detection   | Microsoft Presidio + spaCy NER      | Context-aware PII redaction        |
+| Perplexity      | `facebook/xglm-564M` (optional GPU) | Filter incoherent / repetitive text |
+| Near-Dedup      | MinHash LSH (datasketch)            | Fuzzy duplicate removal            |
 
 <br>
 
@@ -462,6 +523,7 @@ The script handles everything:
 - [x] ⚡ FlexAttention document masking
 - [x] 📐 µP (Maximal Update Parameterization)
 - [x] 📚 Pre-training pipeline with packed sequences
+- [x] 🛡️ Pre-training corpus builder (Docling + Presidio PII + dedup)
 - [x] 💬 SFT with ChatML + loss masking
 - [x] 🎙️ Interactive streaming chat REPL
 - [x] 🤖 Agentic synthetic data generation
@@ -500,6 +562,8 @@ The script handles everything:
 │  📊 W&B                 │  Experiment tracking   │
 │  ☁️  Boto3             │  AWS S3 storage         │
 │  🤖 OpenAI + Anthropic │  Teacher model APIs     │
+│  🛡️  Presidio + spaCy │  PII detection (NER)    │
+│  📄 Docling            │  GPU PDF extraction     │
 │  📋 Pydantic           │  Data validation        │
 │  🎨 Rich               │  Terminal UI            │
 │  ⚙️  Typer             │  CLI framework          │

@@ -26,7 +26,7 @@ from typing import Generator
 
 import xxhash
 
-from cleaners import CleanerConfig, PDFCleaner, TextNormalizer
+from cleaners import CleanerConfig, MinimalNormalizer, PDFCleaner, TextNormalizer
 
 logger = logging.getLogger(__name__)
 
@@ -341,19 +341,35 @@ class DoclingPDFExtractor:
         if self._converter is not None:
             return
 
+        from docling.backend.docling_parse_backend import DoclingParseDocumentBackend
+        from docling.datamodel.accelerator_options import AcceleratorDevice, AcceleratorOptions
         from docling.document_converter import DocumentConverter, PdfFormatOption
         from docling.datamodel.base_models import InputFormat
-        from docling.datamodel.pipeline_options import PdfPipelineOptions
+        from docling.datamodel.pipeline_options import (
+            PdfPipelineOptions,
+            TableStructureOptions,
+        )
 
-        pipeline_options = PdfPipelineOptions(do_ocr=False)
+        accelerator_options = AcceleratorOptions(
+            num_threads=8, device=AcceleratorDevice.CUDA
+        )
+
+        pipeline_options = PdfPipelineOptions()
+        pipeline_options.accelerator_options = accelerator_options
+        pipeline_options.do_ocr = False
+        pipeline_options.do_table_structure = False
+        pipeline_options.generate_picture_images = False
+        pipeline_options.table_structure_options = TableStructureOptions(
+            do_cell_matching=True
+        )
 
         self._converter = DocumentConverter(
-            allowed_formats=[InputFormat.PDF],
             format_options={
                 InputFormat.PDF: PdfFormatOption(
                     pipeline_options=pipeline_options,
-                ),
-            },
+                    backend=DoclingParseDocumentBackend
+                )
+            }
         )
 
         logger.info("Docling PDF converter initialized")
@@ -528,13 +544,107 @@ class HTMLExtractor:
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  DOCLING HTML EXTRACTOR
+# ══════════════════════════════════════════════════════════════════════
+
+
+class DoclingHTMLExtractor:
+    """Extract content from HTML files using Docling.
+
+    Uses Docling's ``DocumentConverter`` with ``InputFormat.HTML`` for
+    layout-aware content extraction.  Falls back to trafilatura
+    (``HTMLExtractor``) if Docling is not installed or conversion fails.
+
+    The converter is initialized lazily on first use.
+    """
+
+    _MD_IMAGE_PLACEHOLDER = re.compile(r"<!--\s*image\s*-->")
+
+    def __init__(self) -> None:
+        self._converter = None
+        self._fallback: HTMLExtractor | None = None
+        self.docs_processed: int = 0
+        self.docs_fallback: int = 0
+
+    def _init_converter(self) -> None:
+        """Lazy-initialize Docling converter for HTML."""
+        if self._converter is not None:
+            return
+
+        from docling.document_converter import DocumentConverter
+        from docling.datamodel.base_models import InputFormat
+
+        self._converter = DocumentConverter(
+            allowed_formats=[InputFormat.HTML],
+        )
+        logger.info("Docling HTML converter initialized")
+
+    def _get_fallback(self) -> HTMLExtractor:
+        """Get or create the trafilatura fallback extractor."""
+        if self._fallback is None:
+            self._fallback = HTMLExtractor()
+        return self._fallback
+
+    def extract(self, path: Path) -> DocStream:
+        """Yield ``(source, text)`` for a single HTML file."""
+        try:
+            self._init_converter()
+        except ImportError as exc:
+            logger.warning(
+                "docling not installed — falling back to trafilatura for %s: %s",
+                path, exc,
+            )
+            yield from self._get_fallback().extract(path)
+            return
+
+        try:
+            result = self._converter.convert(path, raises_on_error=False)
+        except Exception as exc:
+            logger.warning(
+                "Docling failed on HTML %s: %s — falling back to trafilatura",
+                path.name, exc,
+            )
+            self.docs_fallback += 1
+            yield from self._get_fallback().extract(path)
+            return
+
+        from docling.datamodel.base_models import ConversionStatus
+
+        if result.status in (ConversionStatus.FAILURE, ConversionStatus.SKIPPED):
+            errors = "; ".join(str(e) for e in (result.errors or []))
+            logger.warning(
+                "Docling failed on %s (status=%s%s) — falling back to trafilatura",
+                path.name, result.status.name,
+                f": {errors}" if errors else "",
+            )
+            self.docs_fallback += 1
+            yield from self._get_fallback().extract(path)
+            return
+
+        self.docs_processed += 1
+
+        text = result.document.export_to_markdown(
+            image_placeholder="",
+            escape_underscores=False,
+        )
+        if not text or not text.strip():
+            return
+
+        # Clean residual markdown artifacts
+        text = self._MD_IMAGE_PLACEHOLDER.sub("", text)
+
+        if text and text.strip():
+            yield str(path), text
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  JSON / JSONL EXTRACTORS
 # ══════════════════════════════════════════════════════════════════════
 
 
 def _recursive_key_search(
-    obj: object,
-    keys: set[str],
+        obj: object,
+        keys: set[str],
 ) -> list[tuple[str, str]]:
     """Recursively find all string values at matching keys.
 
@@ -601,7 +711,7 @@ class JSONExtractor:
     1000 JSON files → 1000 documents
     """
 
-    def __init__(self, search_keys: list[str], separator: str = "; ") -> None:
+    def __init__(self, search_keys: list[str], separator: str = "\n") -> None:
         self._keys: set[str] = set(search_keys)
         self._sep = separator
 
@@ -633,13 +743,13 @@ class JSONLExtractor:
 
     Same recursive key search as JSONExtractor, applied per line.
     All unique text fragments within a single line are concatenated
-    into **one document per line** (joined with ``"; "``).
+    into **one document per line** (joined with newline).
 
     1 JSONL line with 3 "text" keys → 1 document
     500-line JSONL file → up to 500 documents
     """
 
-    def __init__(self, search_keys: list[str], separator: str = "; ") -> None:
+    def __init__(self, search_keys: list[str], separator: str = "\n") -> None:
         self._keys: set[str] = set(search_keys)
         self._sep = separator
 
@@ -738,21 +848,38 @@ class XMLExtractor:
 
 
 class ExtractorRegistry:
-    """Dispatches files to the appropriate extractor by format."""
+    """Dispatches files to the appropriate extractor by format.
+
+    Parameters
+    ----------
+    docling_formats : list[str] | None
+        Formats to process with Docling (e.g. ``["pdf", "html"]``).
+        Defaults to ``["pdf", "html"]``.  Pass an empty list to disable
+        Docling entirely (legacy pymupdf + trafilatura).
+    """
 
     def __init__(
-        self,
-        search_keys: list[str],
-        cleaner_cfg: CleanerConfig | None = None,
-        skip_xml: bool = True,
-        skip_html: bool = False,
-        json_separator: str = "; ",
-        use_docling: bool = True,
+            self,
+            search_keys: list[str],
+            cleaner_cfg: CleanerConfig | None = None,
+            skip_xml: bool = True,
+            skip_html: bool = False,
+            json_separator: str = "\n",
+            docling_formats: list[str] | None = None,
     ) -> None:
-        self._normalizer = TextNormalizer(cleaner_cfg)
-        self._use_docling = use_docling
+        self._normalizer = MinimalNormalizer()
 
-        if use_docling:
+        # ── Resolve Docling formats ────────────────────────────────
+        if docling_formats is not None:
+            self._docling_formats: set[str] = set(docling_formats)
+        else:
+            self._docling_formats = {"pdf", "html"}  # default
+
+        # Backward-compat property used by phase1 batch processing
+        self._use_docling = "pdf" in self._docling_formats
+
+        # ── PDF extractor ──────────────────────────────────────────
+        if "pdf" in self._docling_formats:
             pdf_extractor = DoclingPDFExtractor(cleaner_cfg)
         else:
             pdf_extractor = PDFExtractor(cleaner_cfg)
@@ -764,8 +891,12 @@ class ExtractorRegistry:
             "jsonl": JSONLExtractor(search_keys, separator=json_separator),
         }
 
+        # ── HTML extractor ─────────────────────────────────────────
         if not skip_html:
-            self._extractors["html"] = HTMLExtractor()
+            if "html" in self._docling_formats:
+                self._extractors["html"] = DoclingHTMLExtractor()
+            else:
+                self._extractors["html"] = HTMLExtractor()
 
         if not skip_xml:
             self._extractors["xml"] = XMLExtractor()
@@ -777,9 +908,9 @@ class ExtractorRegistry:
             self._skip_formats.add("html")
 
     def extract_and_normalize(
-        self,
-        fmt: str,
-        path: Path,
+            self,
+            fmt: str,
+            path: Path,
     ) -> Generator[tuple[str, str], None, None]:
         """Extract documents from *path*, normalize text, yield results.
 
@@ -800,9 +931,9 @@ class ExtractorRegistry:
                 yield source, cleaned
 
     def extract_and_normalize_batch(
-        self,
-        fmt: str,
-        paths: list[Path],
+            self,
+            fmt: str,
+            paths: list[Path],
     ) -> Generator[tuple[str, str], None, None]:
         """Batch extract + normalize for formats that support it (PDF with Docling).
 
