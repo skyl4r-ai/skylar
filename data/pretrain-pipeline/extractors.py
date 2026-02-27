@@ -571,33 +571,14 @@ class DoclingHTMLExtractor:
         if self._converter is not None:
             return
 
-        from docling.backend.docling_parse_v4_backend import DoclingParseV4DocumentBackend
-        from docling.datamodel.accelerator_options import AcceleratorDevice, AcceleratorOptions
         from docling.document_converter import DocumentConverter, HTMLFormatOption
         from docling.datamodel.base_models import InputFormat
-        from docling.datamodel.pipeline_options import (
-            PipelineOptions,
-            TableStructureOptions,
-        )
-
-        accelerator_options = AcceleratorOptions(
-            num_threads=8, device=AcceleratorDevice.CUDA
-        )
-
-        pipeline_options = PipelineOptions()
-        pipeline_options.accelerator_options = accelerator_options
-        pipeline_options.do_ocr = False
-        pipeline_options.do_table_structure = False
-        pipeline_options.generate_picture_images = False
-        pipeline_options.table_structure_options = TableStructureOptions(
-            do_cell_matching=True
-        )
+        from docling.pipeline.simple_pipeline import SimplePipeline
 
         self._converter = DocumentConverter(
             format_options={
                 InputFormat.HTML: HTMLFormatOption(
-                    pipeline_options=pipeline_options,
-                    backend=DoclingParseV4DocumentBackend
+                    pipeline_cls=SimplePipeline,
                 )
             }
         )

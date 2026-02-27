@@ -700,7 +700,7 @@ def build(
             help="Output directory for final chunk files.",
         ),
         search_keys: list[str] = typer.Option(
-            ["text", "testo"], # nel dataset per ora abbiamo questo
+            ["text", "testo"],  # nel dataset per ora abbiamo questo
             "--key", "-k",
             help="Keys to search in JSON/JSONL (can repeat: -k text -k testo -k body).",
         ),
@@ -762,10 +762,10 @@ def build(
         ),
         # ── Docling format toggles ─────────────────────────────────
         docling_formats: str = typer.Option(
-            "pdf,html", "--docling-formats",
+            "pdf", "--docling-formats",
             help=(
-                "Comma-separated formats to process with Docling "
-                "(e.g., pdf,html). Empty string disables Docling."
+                    "Comma-separated formats to process with Docling "
+                    "(e.g., pdf,docx). Empty string disables Docling."
             ),
         ),
         no_docling: bool = typer.Option(
