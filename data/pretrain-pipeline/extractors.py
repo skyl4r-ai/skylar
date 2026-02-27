@@ -341,7 +341,7 @@ class DoclingPDFExtractor:
         if self._converter is not None:
             return
 
-        from docling.backend.docling_parse_backend import DoclingParseDocumentBackend
+        from docling.backend.docling_parse_v4_backend import DoclingParseV4DocumentBackend
         from docling.datamodel.accelerator_options import AcceleratorDevice, AcceleratorOptions
         from docling.document_converter import DocumentConverter, PdfFormatOption
         from docling.datamodel.base_models import InputFormat
@@ -367,7 +367,7 @@ class DoclingPDFExtractor:
             format_options={
                 InputFormat.PDF: PdfFormatOption(
                     pipeline_options=pipeline_options,
-                    backend=DoclingParseDocumentBackend
+                    backend=DoclingParseV4DocumentBackend
                 )
             }
         )
@@ -571,12 +571,37 @@ class DoclingHTMLExtractor:
         if self._converter is not None:
             return
 
-        from docling.document_converter import DocumentConverter
+        from docling.backend.docling_parse_v4_backend import DoclingParseV4DocumentBackend
+        from docling.datamodel.accelerator_options import AcceleratorDevice, AcceleratorOptions
+        from docling.document_converter import DocumentConverter, HTMLFormatOption
         from docling.datamodel.base_models import InputFormat
+        from docling.datamodel.pipeline_options import (
+            PipelineOptions,
+            TableStructureOptions,
+        )
+
+        accelerator_options = AcceleratorOptions(
+            num_threads=8, device=AcceleratorDevice.CUDA
+        )
+
+        pipeline_options = PipelineOptions()
+        pipeline_options.accelerator_options = accelerator_options
+        pipeline_options.do_ocr = False
+        pipeline_options.do_table_structure = False
+        pipeline_options.generate_picture_images = False
+        pipeline_options.table_structure_options = TableStructureOptions(
+            do_cell_matching=True
+        )
 
         self._converter = DocumentConverter(
-            allowed_formats=[InputFormat.HTML],
+            format_options={
+                InputFormat.HTML: HTMLFormatOption(
+                    pipeline_options=pipeline_options,
+                    backend=DoclingParseV4DocumentBackend
+                )
+            }
         )
+
         logger.info("Docling HTML converter initialized")
 
     def _get_fallback(self) -> HTMLExtractor:
