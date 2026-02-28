@@ -58,7 +58,8 @@ from rich.table import Table
 
 from cleaners import CleanerConfig, ColumnMergeConfig, ColumnMergeCleaner, RepetitionScorer
 from extractors import ExtractorRegistry, discover_files
-from pipeline import Pipeline, PipelineConfig, PipelineStats
+from journal import Journal, hash_file
+from pipeline import Pipeline, PipelineConfig, PipelineStats, ExactDedup, NearDedup
 from prose_filter import ProseConfig, ProseFilter, FilterStats as ProseStats, flatten_to_prose
 from typo_detector import TypoDetector
 
@@ -294,11 +295,54 @@ def _print_pipeline_report(pipe_stats: PipelineStats, pipe: Pipeline) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Phase 1 — Extract, clean, filter, chunk
+# Phase 1a — Extract, clean, filter (incremental — no dedup)
 # ──────────────────────────────────────────────────────────────────────
 
 
-def phase1_extract_and_filter(
+def _process_single_doc(
+        text: str,
+        fmt: str,
+        source: str,
+        col_merge_cleaner: ColumnMergeCleaner | None,
+        prose_filter: ProseFilter,
+        repetition_scorer: RepetitionScorer,
+        max_rep_ratio: float,
+        pipe: Pipeline,
+        typo_detector: TypoDetector | None,
+        repetition_rejects: list[int],
+) -> str | None:
+    """Run one document through the full filter chain (no dedup).
+
+    Returns cleaned text or None if rejected.
+    """
+    if fmt == "txt":
+        text = flatten_to_prose(text)
+        return text if text else None
+
+    if col_merge_cleaner is not None:
+        text = col_merge_cleaner.clean(text)
+        if not text:
+            return None
+
+    text = prose_filter.process(text)
+    if not text:
+        return None
+
+    if repetition_scorer.is_repetitive(text, max_rep_ratio):
+        repetition_rejects[0] += 1
+        return None
+
+    keep, cleaned = pipe.process(text)
+    if not keep:
+        return None
+
+    if typo_detector is not None:
+        typo_detector.check(cleaned, source=source)
+
+    return cleaned
+
+
+def phase1a_extract_and_filter(
         file_map: dict[str, list[Path]],
         registry: ExtractorRegistry,
         col_merge_cleaner: ColumnMergeCleaner | None,
@@ -306,23 +350,26 @@ def phase1_extract_and_filter(
         pipe: Pipeline,
         repetition_scorer: RepetitionScorer,
         max_rep_ratio: float,
-        temp_dir: Path,
-        max_chunk_bytes: int,
+        journal: Journal,
         typo_detector: TypoDetector | None = None,
-) -> tuple[list[Path], np.ndarray, dict[str, tuple[int, int]]]:
-    """Walk source files → extract → normalize → column merge → prose filter → pipeline → temp chunks.
+) -> tuple[list[tuple[str, str]], dict[str, tuple[int, int]], int, int]:
+    """Walk source files → extract → normalize → filter (incremental, no dedup).
+
+    Uses the journal to skip already-processed files.  Dedup is NOT run
+    here — it happens in Phase 1b on the full corpus.
 
     Returns:
-        (temp_file_paths, index_array, per_format_stats)
+        (all_docs, per_format_stats, cache_hits, cache_misses)
+        where all_docs is list of (text, source) tuples.
     """
-    console.rule("[bold cyan]Phase 1[/]  Extract → Clean → Column Merge → Prose Filter → Pipeline → Chunk")
+    console.rule("[bold cyan]Phase 1a[/]  Extract → Filter (incremental)")
 
-    writer = ChunkWriter(temp_dir, max_chunk_bytes, prefix="tmp_")
-    indices: list[tuple[int, int, int]] = []
-    extraction_stats: dict[str, tuple[int, int]] = {}  # fmt → (n_files, n_docs)
-    repetition_rejects: int = 0
+    all_docs: list[tuple[str, str]] = []
+    extraction_stats: dict[str, tuple[int, int]] = {}
+    repetition_rejects: list[int] = [0]  # mutable counter for helper
+    cache_hits = 0
+    cache_misses = 0
 
-    # Count total files for progress
     total_files = sum(len(files) for files in file_map.values())
 
     with Progress(
@@ -343,142 +390,139 @@ def phase1_extract_and_filter(
 
             # ── PDF with Docling: batch convert_all() for GPU efficiency ──
             if fmt == "pdf" and registry._use_docling:
-                docs_seen = 0
-                try:
-                    for _source, text in registry.extract_and_normalize_batch(fmt, files):
-                        docs_seen += 1
-                        # Full pipeline: ColumnMergeCleaner + ProseFilter
-                        if col_merge_cleaner is not None:
-                            text = col_merge_cleaner.clean(text)
-                            if not text:
-                                continue
+                # Separate cached vs new files
+                new_files: list[Path] = []
+                file_hashes: dict[str, str] = {}  # abs_path → hash
 
-                        text = prose_filter.process(text)
-                        if not text:
-                            continue
+                for fp in files:
+                    fh = hash_file(fp)
+                    abs_key = str(fp.resolve())
+                    file_hashes[abs_key] = fh
+                    cached = journal.lookup(fp, fh)
+                    if cached is not None:
+                        all_docs.extend(cached)
+                        fmt_docs += len(cached)
+                        cache_hits += 1
+                    else:
+                        new_files.append(fp)
+                        cache_misses += 1
 
-                        # ── Repetition check (pre-pipeline) ──────
-                        if repetition_scorer.is_repetitive(text, max_rep_ratio):
-                            repetition_rejects += 1
-                            continue
-
-                        # ── Pipeline (PII → quality → spam → dedup)
-                        keep, cleaned = pipe.process(text)
-                        if not keep:
-                            continue
-
-                        # ── Typo detection (log only) ──────────
-                        if typo_detector is not None:
-                            typo_detector.check(cleaned, source=_source)
-
-                        # ── Write to temp chunk ──────────────────
-                        file_idx, offset, length = writer.write_document(cleaned)
-                        indices.append((file_idx, offset, length))
-                        fmt_docs += 1
-
-                        progress.update(
-                            task,
-                            completed=docs_seen,
-                            description=(
-                                f"[green]{fmt.upper()} (batch)  "
-                                f"[dim]kept {pipe.stats.total_kept:,} / "
-                                f"{pipe.stats.total_seen:,}  "
-                                f"({_fmt_bytes(writer.total_bytes)})"
-                            ),
-                        )
-
-                except Exception as exc:
-                    console.print(
-                        f"  [yellow]⚠[/] Error in PDF batch processing: {exc}"
+                if cache_hits > 0:
+                    progress.update(
+                        task,
+                        description=(
+                            f"[green]{fmt.upper()} (batch)  "
+                            f"[dim]{cache_hits} cached, {len(new_files)} new"
+                        ),
                     )
 
-                # Advance progress bar to cover all PDF files
-                progress.update(task, completed=fmt_files)
-
-            else:
-                # ── Per-file processing (TXT, HTML, JSON, JSONL, XML, legacy PDF) ──
-                files_done = 0
-                for file_path in files:
+                # Batch-process only new files
+                if new_files:
+                    # Group results by source file for journal storage
+                    batch_docs_by_file: dict[str, list[tuple[str, str]]] = {}
+                    docs_seen = 0
                     try:
-                        for _source, text in registry.extract_and_normalize(fmt, file_path):
-                            if fmt == "txt":
-                                # ── TXT: curated data (chat templates, SFT) ──
-                                # TXT files are hand-crafted and intentionally
-                                # included to teach the model chat structure
-                                # (ChatML <|im_start|>/<|im_end|>) from the
-                                # earliest pre-training steps.  They bypass ALL
-                                # filters — only MinimalNormalizer is applied.
-                                text = flatten_to_prose(text)
-                                if not text:
-                                    continue
-                                file_idx, offset, length = writer.write_document(text)
-                                indices.append((file_idx, offset, length))
-                                fmt_docs += 1
+                        for _source, text in registry.extract_and_normalize_batch(fmt, new_files):
+                            docs_seen += 1
+                            cleaned = _process_single_doc(
+                                text, fmt, _source,
+                                col_merge_cleaner, prose_filter,
+                                repetition_scorer, max_rep_ratio,
+                                pipe, typo_detector, repetition_rejects,
+                            )
+                            if cleaned is None:
                                 continue
 
-                            # Full pipeline: ColumnMergeCleaner + ProseFilter
-                            if col_merge_cleaner is not None:
-                                text = col_merge_cleaner.clean(text)
-                                if not text:
-                                    continue
-
-                            text = prose_filter.process(text)
-                            if not text:
-                                continue
-
-                            # ── Repetition check (pre-pipeline) ──────
-                            if repetition_scorer.is_repetitive(text, max_rep_ratio):
-                                repetition_rejects += 1
-                                continue
-
-                            # ── Pipeline (PII → quality → spam → dedup)
-                            keep, cleaned = pipe.process(text)
-                            if not keep:
-                                continue
-
-                            # ── Typo detection (log only) ──────────
-                            if typo_detector is not None:
-                                typo_detector.check(cleaned, source=_source)
-
-                            # ── Write to temp chunk ──────────────────
-                            file_idx, offset, length = writer.write_document(cleaned)
-                            indices.append((file_idx, offset, length))
+                            all_docs.append((cleaned, _source))
                             fmt_docs += 1
+
+                            batch_docs_by_file.setdefault(_source, []).append(
+                                (cleaned, _source)
+                            )
+
+                            progress.update(
+                                task,
+                                description=(
+                                    f"[green]{fmt.upper()} (batch)  "
+                                    f"[dim]docs {len(all_docs):,}  "
+                                    f"({cache_hits} cached)"
+                                ),
+                            )
 
                     except Exception as exc:
                         console.print(
-                            f"  [yellow]⚠[/] Error processing {file_path.name}: {exc}"
+                            f"  [yellow]⚠[/] Error in PDF batch processing: {exc}"
                         )
 
-                    files_done += 1
+                    # Save to journal per source file
+                    for fp in new_files:
+                        abs_key = str(fp.resolve())
+                        # Match against str(fp) since extractors yield str(path)
+                        docs_for_file = batch_docs_by_file.get(str(fp), [])
+                        journal.store(fp, file_hashes[abs_key], docs_for_file)
+
+                progress.update(task, advance=fmt_files)
+
+            else:
+                # ── Per-file processing (TXT, HTML, JSON, JSONL, XML, legacy PDF) ──
+                for file_path in files:
+                    fh = hash_file(file_path)
+                    cached = journal.lookup(file_path, fh)
+
+                    if cached is not None:
+                        all_docs.extend(cached)
+                        fmt_docs += len(cached)
+                        cache_hits += 1
+                    else:
+                        cache_misses += 1
+                        file_docs: list[tuple[str, str]] = []
+                        try:
+                            for _source, text in registry.extract_and_normalize(fmt, file_path):
+                                cleaned = _process_single_doc(
+                                    text, fmt, _source,
+                                    col_merge_cleaner, prose_filter,
+                                    repetition_scorer, max_rep_ratio,
+                                    pipe, typo_detector, repetition_rejects,
+                                )
+                                if cleaned is None:
+                                    continue
+
+                                file_docs.append((cleaned, _source))
+                                fmt_docs += 1
+
+                        except Exception as exc:
+                            console.print(
+                                f"  [yellow]⚠[/] Error processing {file_path.name}: {exc}"
+                            )
+
+                        all_docs.extend(file_docs)
+                        journal.store(file_path, fh, file_docs)
+
                     progress.update(
                         task,
                         advance=1,
                         description=(
                             f"[green]{fmt.upper()}  "
-                            f"[dim]kept {pipe.stats.total_kept:,} / "
-                            f"{pipe.stats.total_seen:,}  "
-                            f"({_fmt_bytes(writer.total_bytes)})"
+                            f"[dim]docs {len(all_docs):,}  "
+                            f"({cache_hits} cached)"
                         ),
                     )
 
             if fmt_files > 0:
                 extraction_stats[fmt] = (fmt_files, fmt_docs)
 
-    writer.close()
-    idx_array = np.array(indices, dtype=DOC_INDEX_DTYPE)
-
     console.print(
-        f"\n  [bold green]✓[/] {len(idx_array):,} documents kept  •  "
-        f"{_fmt_bytes(writer.total_bytes)}  •  "
-        f"{writer.num_chunks} temp chunk(s)"
+        f"\n  [bold green]✓[/] {len(all_docs):,} documents after extraction + filtering"
     )
-    if repetition_rejects > 0:
+    console.print(
+        f"  [dim]↳[/] {cache_hits} from cache, {cache_misses} newly processed"
+    )
+    if repetition_rejects[0] > 0:
         console.print(
-            f"  [yellow]↳[/] {repetition_rejects:,} rejected by repetition scorer"
+            f"  [yellow]↳[/] {repetition_rejects[0]:,} rejected by repetition scorer"
         )
 
-    # PDF garbage stats (pages for legacy pymupdf, docs for Docling)
+    # PDF garbage stats
     pdf_total, pdf_skipped, pdf_fallback = registry.pdf_stats
     if pdf_skipped > 0:
         unit = "documents" if registry._use_docling else "pages"
@@ -581,7 +625,96 @@ def phase1_extract_and_filter(
             )
         console.print()
 
-    return writer.files, idx_array, extraction_stats
+    return all_docs, extraction_stats, cache_hits, cache_misses
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Phase 1b — Dedup & Chunk (always fresh)
+# ──────────────────────────────────────────────────────────────────────
+
+
+def phase1b_dedup_and_chunk(
+        all_docs: list[tuple[str, str]],
+        pipe_cfg: PipelineConfig,
+        temp_dir: Path,
+        max_chunk_bytes: int,
+) -> tuple[list[Path], np.ndarray, PipelineStats]:
+    """Run fresh ExactDedup + NearDedup on ALL documents, then write temp chunks.
+
+    Returns:
+        (temp_file_paths, index_array, dedup_stats)
+    """
+    console.rule("[bold cyan]Phase 1b[/]  Dedup → Chunk (fresh)")
+
+    # Build fresh dedup filters
+    dedup_filters: list = []
+    if pipe_cfg.exact_dedup_enabled:
+        dedup_filters.append(ExactDedup())
+    if pipe_cfg.near_dedup_enabled:
+        dedup_filters.append(NearDedup(pipe_cfg))
+
+    writer = ChunkWriter(temp_dir, max_chunk_bytes, prefix="tmp_")
+    indices: list[tuple[int, int, int]] = []
+    dedup_stats = PipelineStats()
+    dedup_rejects = 0
+
+    with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(bar_width=40),
+            MofNCompleteColumn(),
+            TextColumn("•"),
+            TimeElapsedColumn(),
+            console=console,
+            transient=False,
+    ) as progress:
+        task = progress.add_task("[green]Dedup + chunk", total=len(all_docs))
+
+        for i, (text, _source) in enumerate(all_docs):
+            dedup_stats.total_seen += 1
+            rejected = False
+
+            for filt in dedup_filters:
+                result = filt(text)
+                if not result.keep:
+                    dedup_stats.record_reject(filt.name, result.reason)
+                    dedup_rejects += 1
+                    rejected = True
+                    break
+
+            if not rejected:
+                dedup_stats.total_kept += 1
+                file_idx, offset, length = writer.write_document(text)
+                indices.append((file_idx, offset, length))
+
+            if i % 5_000 == 0:
+                progress.update(
+                    task,
+                    completed=i,
+                    description=(
+                        f"[green]Dedup + chunk  "
+                        f"[dim]kept {dedup_stats.total_kept:,} / "
+                        f"{dedup_stats.total_seen:,}"
+                    ),
+                )
+
+        progress.update(task, completed=len(all_docs))
+
+    writer.close()
+    idx_array = np.array(indices, dtype=DOC_INDEX_DTYPE)
+
+    console.print(
+        f"\n  [bold green]✓[/] {len(idx_array):,} documents after dedup  •  "
+        f"{_fmt_bytes(writer.total_bytes)}  •  "
+        f"{writer.num_chunks} temp chunk(s)"
+    )
+    if dedup_rejects > 0:
+        console.print(
+            f"  [yellow]↳[/] {dedup_rejects:,} rejected by dedup"
+        )
+    console.print()
+
+    return writer.files, idx_array, dedup_stats
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -705,7 +838,7 @@ def build(
             help="Keys to search in JSON/JSONL (can repeat: -k text -k testo -k body).",
         ),
         seed: int = typer.Option(42, "--seed"),
-        max_gb: float = typer.Option(0.5, "--max-gb", help="Max size per output chunk in GB."),
+        max_gb: float = typer.Option(1.0, "--max-gb", help="Max size per output chunk in GB."),
         config: Path | None = typer.Option(
             None, "--config", "-c",
             help="YAML config for pipeline thresholds.",
@@ -777,6 +910,11 @@ def build(
             None, "--typo-log",
             help="Log suspicious words (typos/OCR errors) to this CSV file for review.",
         ),
+        # ── Cache / incremental ────────────────────────────────────
+        no_cache: bool = typer.Option(
+            False, "--no-cache",
+            help="Ignore journal cache and reprocess all files from scratch.",
+        ),
 ) -> None:
     """Build a pre-training corpus from local files."""
 
@@ -805,8 +943,9 @@ def build(
     pipe_cfg.pii_enabled = not no_pii
     pipe_cfg.quality_enabled = not no_quality
     pipe_cfg.spam_enabled = not no_spam
-    pipe_cfg.exact_dedup_enabled = not no_exact_dedup
-    pipe_cfg.near_dedup_enabled = not no_near_dedup
+    # Dedup disabled in Phase 1a pipeline — runs fresh in Phase 1b
+    pipe_cfg.exact_dedup_enabled = False
+    pipe_cfg.near_dedup_enabled = False
     pipe_cfg.near_dedup_threshold = near_dedup_threshold
     pipe_cfg.near_dedup_num_perm = near_dedup_num_perm
     pipe_cfg.min_doc_chars = min_doc_chars
@@ -815,6 +954,13 @@ def build(
         pipe_cfg.blacklist_domains_path = str(blacklist_domains)
     if blacklist_keywords:
         pipe_cfg.blacklist_keywords_path = str(blacklist_keywords)
+
+    # Separate dedup config — used in Phase 1b with original user flags
+    dedup_cfg = PipelineConfig()
+    dedup_cfg.exact_dedup_enabled = not no_exact_dedup
+    dedup_cfg.near_dedup_enabled = not no_near_dedup
+    dedup_cfg.near_dedup_threshold = near_dedup_threshold
+    dedup_cfg.near_dedup_num_perm = near_dedup_num_perm
 
     pipe = Pipeline(pipe_cfg)
 
@@ -854,12 +1000,22 @@ def build(
         docling_formats=docling_fmt_list,
     )
 
+    # ── Journal ────────────────────────────────────────────────────
+    journal = Journal(output, enabled=not no_cache)
+
     # ── Banner ────────────────────────────────────────────────────
     banner = Table.grid(padding=(0, 2))
     banner.add_row("[bold]Source", str(source.resolve()))
     banner.add_row("[bold]Output", str(output.resolve()))
     banner.add_row("[bold]Max chunk", _fmt_bytes(max_chunk_bytes))
     banner.add_row("[bold]Seed", str(seed))
+    if journal.enabled:
+        banner.add_row(
+            "[bold]Cache",
+            f"[green]enabled[/] [dim]({journal.n_entries} cached)[/]",
+        )
+    else:
+        banner.add_row("[bold]Cache", "[yellow]disabled (--no-cache)[/]")
     if docling_fmt_list:
         docling_label = ", ".join(f.upper() for f in docling_fmt_list)
         banner.add_row("[bold]Docling formats", f"[green]{docling_label}[/]")
@@ -895,11 +1051,11 @@ def build(
         active.append("[green]Quality[/]")
     if pipe_cfg.spam_enabled:
         active.append("[green]Spam[/]")
-    if pipe_cfg.exact_dedup_enabled:
+    if dedup_cfg.exact_dedup_enabled:
         active.append("[green]ExactDedup[/]")
-    if pipe_cfg.near_dedup_enabled:
+    if dedup_cfg.near_dedup_enabled:
         active.append(
-            f"[green]NearDedup[/] [dim](J≥{pipe_cfg.near_dedup_threshold})"
+            f"[green]NearDedup[/] [dim](J≥{dedup_cfg.near_dedup_threshold})"
         )
     active.append(f"[green]Repetition[/] [dim](≤{max_rep_ratio})")
     if not no_column_merge:
@@ -927,7 +1083,7 @@ def build(
 
     t0 = time.perf_counter()
 
-    # ── Phase 1 ───────────────────────────────────────────────────
+    # ── Phase 1a — Extract & Filter (incremental) ─────────────────
     # If prose filter is disabled, create a passthrough that just flattens
     if prose_filt is None:
         prose_filt = _PassthroughProseFilter()
@@ -935,7 +1091,7 @@ def build(
     # ── Typo detector (optional) ─────────────────────────────
     typo_det = TypoDetector(typo_log) if typo_log else None
 
-    temp_files, indices, extraction_stats = phase1_extract_and_filter(
+    all_docs, extraction_stats, cache_hits, cache_misses = phase1a_extract_and_filter(
         file_map=file_map,
         registry=registry,
         col_merge_cleaner=col_merge,
@@ -943,20 +1099,38 @@ def build(
         pipe=pipe,
         repetition_scorer=repetition_scorer,
         max_rep_ratio=max_rep_ratio,
-        temp_dir=temp_dir,
-        max_chunk_bytes=max_chunk_bytes,
+        journal=journal,
         typo_detector=typo_det,
     )
 
-    if len(indices) == 0:
+    if len(all_docs) == 0:
         console.print("[bold red]No documents survived the pipeline. Exiting.[/]")
+        raise typer.Exit(code=1)
+
+    # ── Phase 1b — Dedup & Chunk (always fresh) ──────────────────
+    temp_files, indices, dedup_stats = phase1b_dedup_and_chunk(
+        all_docs=all_docs,
+        pipe_cfg=dedup_cfg,
+        temp_dir=temp_dir,
+        max_chunk_bytes=max_chunk_bytes,
+    )
+
+    # Free docs from memory — they're now in temp chunks
+    del all_docs
+
+    if len(indices) == 0:
+        console.print("[bold red]No documents survived dedup. Exiting.[/]")
         phase4_cleanup(temp_dir)
         raise typer.Exit(code=1)
 
     # ── Phase 2 ───────────────────────────────────────────────────
     phase2_shuffle(indices, seed)
 
-    # ── Phase 3 ───────────────────────────────────────────────────
+    # ── Phase 3 — Clean old output files, write shuffled ─────────
+    # Remove old corpus files (but not .cache or .tmp_shuffle)
+    for old_file in output.glob("*.txt"):
+        old_file.unlink()
+
     output_files = phase3_write_shuffled(
         indices, temp_files, output, max_chunk_bytes,
     )
@@ -967,6 +1141,11 @@ def build(
     # ── Final summary ─────────────────────────────────────────────
     elapsed = time.perf_counter() - t0
 
+    # Merge pipeline stats (Phase 1a filters + Phase 1b dedup)
+    total_docs_extracted = sum(d for _, d in extraction_stats.values())
+    total_seen_pipeline = pipe.stats.total_seen
+    total_seen_dedup = dedup_stats.total_seen
+
     summary = Table(
         title="[bold]Final Summary",
         border_style="green",
@@ -975,15 +1154,19 @@ def build(
     summary.add_column("Metric", style="bold")
     summary.add_column("Value", justify="right")
 
-    total_extracted = sum(d for _, d in extraction_stats.values())
     summary.add_row("Files scanned", f"{sum(f for f, _ in extraction_stats.values()):,}")
-    summary.add_row("Docs extracted", f"{total_extracted:,}")
-    summary.add_row("Docs seen by pipeline", f"{pipe.stats.total_seen:,}")
-    summary.add_row("Docs rejected", f"[red]{pipe.stats.total_rejected:,}[/]")
-    summary.add_row("Docs kept", f"[green]{pipe.stats.total_kept:,}[/]")
+    summary.add_row("Docs extracted", f"{total_docs_extracted:,}")
     summary.add_row(
-        "Keep rate",
-        f"[green]{_pct(pipe.stats.total_kept, pipe.stats.total_seen)}[/]",
+        "Cache",
+        f"[green]{cache_hits} hits[/] / {cache_misses} misses"
+        if journal.enabled else "[dim]disabled[/]",
+    )
+    summary.add_row("Docs after filters", f"{total_seen_dedup:,}")
+    summary.add_row("Docs rejected (dedup)", f"[red]{dedup_stats.total_rejected:,}[/]")
+    summary.add_row("Docs kept", f"[green]{dedup_stats.total_kept:,}[/]")
+    summary.add_row(
+        "Keep rate (overall)",
+        f"[green]{_pct(dedup_stats.total_kept, total_docs_extracted)}[/]",
     )
     summary.add_row("Output files", str(len(output_files)))
 
@@ -993,7 +1176,7 @@ def build(
     summary.add_row("Elapsed", f"{elapsed:.1f}s")
     summary.add_row(
         "Throughput",
-        f"{pipe.stats.total_seen / elapsed:,.0f} docs/s" if elapsed > 0 else "—",
+        f"{total_docs_extracted / elapsed:,.0f} docs/s" if elapsed > 0 else "—",
     )
 
     console.print()

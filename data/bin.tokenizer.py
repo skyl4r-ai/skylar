@@ -26,9 +26,7 @@ Required env vars for S3:
 Examples
 --------
 # Train new tokenizer + upload to S3
-python bpe_tokenize.py \
-  --data data/pretrain_shuffled \
-  --output data/tokenized_corpus \
+python bin.tokenizer.py \
   --vocab_size 40960 \
   --s3_bucket my-bucket \
   --s3_prefix skylar/tokenized_corpus \
@@ -652,8 +650,15 @@ def parse_args() -> argparse.Namespace:
         description="Pre-tokenize corpus to sharded .bin + upload to S3"
     )
     # I/O
-    p.add_argument("--data", required=True, help="Text file or folder with .txt files")
-    p.add_argument("--output", required=True, help="Local output directory")
+    p.add_argument(
+        "--data",
+        default=Path("../.datasets/pretokenized"),
+        required=True, help="Text file or folder with .txt files")
+    p.add_argument(
+        "--output",
+        default=Path("../.datasets/tokenized"),
+        required=True,
+        help="Local output directory")
     p.add_argument(
         "--tokenizer",
         default=None,
