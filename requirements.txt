@@ -8,6 +8,7 @@ numpy
 accelerate        # multi-GPU training
 wandb             # experiment tracking
 boto3             # S3 shard download (train.py:88)
+python-dotenv     # .env loading
 psutil            # RAM monitoring (train.py:322)
 
 # Optional Dataset Distillation

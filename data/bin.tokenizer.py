@@ -63,6 +63,7 @@ from pathlib import Path
 from typing import Iterator
 
 import numpy as np
+from dotenv import load_dotenv
 from tokenizers import (
     Tokenizer,
     decoders,
@@ -75,7 +76,7 @@ from tokenizers import (
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
-from rich.panel import Panel
+
 from rich.progress import (
     Progress, SpinnerColumn, BarColumn, TextColumn,
     TimeElapsedColumn, MofNCompleteColumn, TimeRemainingColumn,
@@ -578,6 +579,13 @@ def tokenize_file(
                 chunk = f.read(read_chunk_bytes)
                 if not chunk:
                     break
+                # Backtrack to last newline to avoid splitting words/special tokens
+                if len(chunk) == read_chunk_bytes:
+                    last_nl = chunk.rfind('\n')
+                    if last_nl > 0:
+                        excess = len(chunk) - last_nl - 1
+                        f.seek(f.tell() - excess)
+                        chunk = chunk[:last_nl + 1]
                 ids = tokenizer.encode(chunk, add_special_tokens=False).ids
                 if ids:
                     writer.write_ids(ids)
@@ -646,6 +654,9 @@ def build_metadata(
 
 
 def parse_args() -> argparse.Namespace:
+    # Load .env from project root (searches parent dirs automatically)
+    load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
+
     p = argparse.ArgumentParser(
         description="Pre-tokenize corpus to sharded .bin + upload to S3"
     )
@@ -653,11 +664,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--data",
         default=Path("../.datasets/pretokenized"),
-        required=True, help="Text file or folder with .txt files")
+        required=False, help="Text file or folder with .txt files")
     p.add_argument(
         "--output",
         default=Path("../.datasets/tokenized"),
-        required=True,
+        required=False,
         help="Local output directory")
     p.add_argument(
         "--tokenizer",
@@ -670,10 +681,10 @@ def parse_args() -> argparse.Namespace:
     # Tokenization
     p.add_argument("--read_chunk_mb", type=int, default=DEFAULT_READ_CHUNK_MB)
     p.add_argument("--target_shard_mb", type=int, default=DEFAULT_TARGET_SHARD_MB)
-    # S3
-    p.add_argument("--s3_bucket", default=None, help="AWS S3 bucket name")
-    p.add_argument("--s3_prefix", default=None, help="Key prefix inside bucket")
-    p.add_argument("--s3_region", default="eu-south-1", help="AWS region (e.g. eu-west-1)")
+    # S3 (CLI overrides env vars; if neither is set, S3 upload is skipped)
+    p.add_argument("--s3_bucket", default=None, help="AWS S3 bucket name (fallback: S3_BUCKET env)")
+    p.add_argument("--s3_prefix", default=None, help="Key prefix inside bucket (fallback: S3_PREFIX env)")
+    p.add_argument("--s3_region", default=None, help="AWS region (fallback: S3_REGION env, default: eu-south-1)")
     p.add_argument(
         "--delete_local_after_upload",
         action="store_true",
@@ -685,7 +696,14 @@ def parse_args() -> argparse.Namespace:
         default=True,  # se il tuo scenario standard è già con <bos>/<eos> nel testo
         help="Se True, il testo contiene già marker <bos>/<eos> nel corpus e NON vengono iniettati per file",
     )
-    return p.parse_args()
+    args = p.parse_args()
+
+    # Resolve S3 params: CLI > env > None
+    args.s3_bucket = args.s3_bucket or os.environ.get("S3_BUCKET") or None
+    args.s3_prefix = args.s3_prefix or os.environ.get("S3_PREFIX") or None
+    args.s3_region = args.s3_region or os.environ.get("S3_REGION") or "eu-south-1"
+
+    return args
 
 
 def main() -> None:
