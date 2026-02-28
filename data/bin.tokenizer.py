@@ -1074,7 +1074,7 @@ def parse_args() -> argparse.Namespace:
     )
     # LiteToken
     p.add_argument(
-        "--litetoken", action="store_true",
+        "--litetoken", default=True, action="store_true",
         help="Enable LiteToken pruning to remove intermediate merge residues",
     )
     p.add_argument(
