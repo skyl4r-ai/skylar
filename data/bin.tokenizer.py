@@ -39,7 +39,7 @@ python bin_tokenizer.py \\
   --litetoken \\
   --s3_bucket my-bucket \\
   --s3_prefix skylar/tokenized_corpus \\
-  --s3_region eu-west-1
+  --s3_region eu-south-1
 
 # Reuse existing tokenizer
 python bin_tokenizer.py \\
@@ -48,7 +48,7 @@ python bin_tokenizer.py \\
   --tokenizer data/tokenized_corpus/tokenizer.json \\
   --s3_bucket my-bucket \\
   --s3_prefix skylar/pretrain_v1 \\
-  --s3_region eu-west-1
+  --s3_region eu-south-1
 
 # Local only (no S3)
 python bin_tokenizer.py \\
