@@ -14,7 +14,7 @@
 [![Python](https://img.shields.io/badge/python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.1+-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)](https://pytorch.org)
 [![HuggingFace](https://img.shields.io/badge/🤗_HuggingFace-Compatible-FFD21E?style=for-the-badge)](https://huggingface.co)
-[![License](https://img.shields.io/badge/license-Proprietary-red?style=for-the-badge)](#license)
+[![License](https://img.shields.io/badge/license-Apache_2.0-blue?style=for-the-badge)](LICENSE)
 
 <br>
 
@@ -572,6 +572,21 @@ The script handles everything:
 
 <br>
 
+## 📜 License
+
+Skylar is licensed under the **[Apache License 2.0](LICENSE)**.
+
+Copyright © 2026 **Aleksandr Ivanovitch**, who holds all intellectual property
+rights in this software in his capacity as **Chief Technology Officer (CTO)** of
+**Sophia AI S.r.l.** See the [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE) files
+for the full terms and attribution.
+
+You are free to use, modify, and distribute this software under the terms of the
+Apache 2.0 license, provided you retain the copyright, patent, trademark, and
+attribution notices.
+
+<br>
+
 ---
 
 <div align="center">
@@ -586,10 +601,10 @@ The script handles everything:
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Built with 🔥 by [A. Ivanovitch](https://github.com/mwspace) for [Sophia AI](https://sophiaai.it)**
+**Built with 🔥 by [Aleksandr Ivanovitch](https://github.com/mwspace) — CTO, [Sophia AI S.r.l.](https://sophiaai.it)**
 
 *Making frontier AI transparent, auditable, and reproducible.*
 
-<sub>Copyright © 2026 A. Ivanovitch — All rights reserved.</sub>
+<sub>Copyright © 2026 Aleksandr Ivanovitch — CTO, Sophia AI S.r.l. · Licensed under the Apache License 2.0.</sub>
 
 </div>
