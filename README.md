@@ -21,7 +21,7 @@
 *Built from first principles. No black boxes. Every layer, every rotation, every gradient — explicit.*
 
 **by [A. Ivanovitch](https://github.com/mwspace) — CEO [MwSpace](https://mwspace.com) ·
-CTO [Sophia AI](https://sophiaai.it)**
+CTO [Sophia AI](https://2sophia.ai)**
 
 ---
 
@@ -601,7 +601,7 @@ attribution notices.
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Built with 🔥 by [Aleksandr Ivanovitch](https://github.com/mwspace) — CTO, [Sophia AI S.r.l.](https://sophiaai.it)**
+**Built with 🔥 by [Aleksandr Ivanovitch](https://github.com/mwspace) — CTO, [Sophia AI S.r.l.](https://2sophia.ai)**
 
 *Making frontier AI transparent, auditable, and reproducible.*
 
