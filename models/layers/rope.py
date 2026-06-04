@@ -17,19 +17,38 @@ class RotaryEmbedding(nn.Module):
         super().__init__()
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
         self.register_buffer("inv_freq", inv_freq)
-        self._build_cache(max_seq_len)
+        self.max_seq_len = max_seq_len
+        # cos/sin are kept as PLAIN attributes (not registered buffers) and rebuilt
+        # lazily from inv_freq. Registering them as non-persistent buffers is unsafe:
+        # transformers v5 from_pretrained() does not restore non-persistent buffers,
+        # leaving them uninitialized (NaN) — every forward of a LOADED checkpoint
+        # (SFT, chat, generate, resume) would then produce NaN. inv_freq IS persistent
+        # and reloads correctly, so recomputing from it is robust to that.
+        self._cos = None
+        self._sin = None
+        self._cached_len = 0
 
-    def _build_cache(self, seq_len):
-        t = torch.arange(seq_len, device=self.inv_freq.device).float()
-        freqs = torch.outer(t, self.inv_freq)
+    def _build_cache(self, seq_len, device):
+        t = torch.arange(seq_len, device=device).float()
+        freqs = torch.outer(t, self.inv_freq.to(device))
         emb = torch.cat((freqs, freqs), dim=-1)
-        self.register_buffer("cos_cached", emb.cos(), persistent=False)
-        self.register_buffer("sin_cached", emb.sin(), persistent=False)
+        self._cos = emb.cos()
+        self._sin = emb.sin()
+        self._cached_len = seq_len
+
+    def _cache_valid(self, seq_len):
+        return (
+            self._cos is not None
+            and seq_len <= self._cached_len
+            and not self._cos.is_meta
+            and self._cos.device == self.inv_freq.device
+        )
 
     def forward(self, seq_len):
-        if seq_len > self.cos_cached.shape[0]:
-            self._build_cache(seq_len)
-        return self.cos_cached[:seq_len], self.sin_cached[:seq_len]
+        # Lazily (re)build on first use, on growth, or after a device move / load.
+        if not self._cache_valid(seq_len):
+            self._build_cache(max(seq_len, self.max_seq_len), self.inv_freq.device)
+        return self._cos[:seq_len], self._sin[:seq_len]
 
 
 def rotate_half(x):

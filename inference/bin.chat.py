@@ -15,8 +15,8 @@ import os
 import torch
 from tokenizers import Tokenizer, decoders
 
- NanoTransformer
-from chat_format import encode_chatml
+from models.decoder import NanoTransformer
+from utils.chatML import encode_chatml
 
 from rich.console import Console
 from rich.panel import Panel

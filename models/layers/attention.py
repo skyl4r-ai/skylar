@@ -15,6 +15,7 @@ Multi-Head Causal Self-Attention with:
 """
 
 import logging
+import warnings
 
 import torch
 import torch.nn as nn
@@ -204,10 +205,16 @@ class CausalSelfAttention(nn.Module):
         if block_mask is not None and kv_cache is None:
 
             if self.training and self.attn_dropout.p > 0:
-                raise NotImplementedError(
-                    "FlexAttention path currently does not apply attention-probability dropout "
-                    "like SDPA(dropout_p=...). Set dropout=0, disable packing/FlexAttention, "
-                    "or implement an explicit FlexAttention-compatible dropout path."
+                # FlexAttention has no dropout_p argument; attention-probability
+                # dropout is simply not applied on the packed path. Modern LLM
+                # pretraining uses attn dropout = 0, so warn once (the warnings
+                # module dedupes) and proceed instead of hard-crashing the run.
+                # resid_dropout still applies after W_o.
+                warnings.warn(
+                    "FlexAttention packed path does not apply attention dropout "
+                    f"(dropout={self.attn_dropout.p}); proceeding without it. "
+                    "Set dropout=0 to silence, or --no-packing for SDPA dropout.",
+                    RuntimeWarning, stacklevel=2,
                 )
 
             # PATH 1: FlexAttention with document masking

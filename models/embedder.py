@@ -208,7 +208,7 @@ class SkylarEmbedder(PreTrainedModel):
             decoder_path: path to decoder checkpoint dir
             pool_strategy: "mean", "cls", or "last"
         """
-         NanoTransformer
+        from models.decoder import NanoTransformer
 
         logger.info("Loading decoder from %s", decoder_path)
         decoder = NanoTransformer.from_pretrained(decoder_path)

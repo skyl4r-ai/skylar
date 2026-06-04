@@ -61,8 +61,8 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from tokenizers import Tokenizer
 
-from config import get_config, PRESETS
- NanoTransformer, HAS_FLEX_ATTENTION
+from models.config import get_config, PRESETS
+from models.decoder import NanoTransformer, HAS_FLEX_ATTENTION
 
 from rich.console import Console
 from rich.panel import Panel
@@ -929,14 +929,17 @@ def train(args):
             lr = get_lr(step, args.warmup_steps, args.max_steps, args.lr, min_lr,
                         schedule=args.lr_schedule, decay_ratio=args.lr_decay_ratio)
 
-            # Apply LR schedule — scale all groups proportionally
+            # Apply LR schedule — scale all groups proportionally.
+            # Capture each group's base LR ONCE. Must use dict-membership ("not in"),
+            # NOT hasattr: param_groups are dicts, so hasattr(pg, "_base_lr_set") is
+            # always False, which re-captured the already-scheduled LR every step and
+            # compounded it toward 0 (silent LR collapse). Mirrors bin.sft.py.
             for pg in optimizer.param_groups:
                 if use_mup:
-                    base_group_lr = pg.get("_base_lr", pg["lr"])
-                    if not hasattr(pg, "_base_lr_set"):
+                    if "_base_lr_set" not in pg:
                         pg["_base_lr"] = pg["lr"]
                         pg["_base_lr_set"] = True
-                    pg["lr"] = base_group_lr * (lr / args.lr)
+                    pg["lr"] = pg["_base_lr"] * (lr / args.lr)
                 else:
                     pg["lr"] = lr
 
@@ -1026,8 +1029,12 @@ def train(args):
                 train_progress.stop()
                 raw_model = unwrap_model()
                 raw_model.eval()
-                prompt = "<bos>"
-                input_ids = torch.tensor([tokenizer.encode(prompt).ids], device=device)
+                # Seed with a clean single <bos>: encoding the literal string
+                # "<bos>" with the post-processor active yields [bos, bos, eos].
+                bos_id = tokenizer.token_to_id("<bos>")
+                if bos_id is None:
+                    bos_id = getattr(raw_model.config, "bos_token_id", 0) or 0
+                input_ids = torch.tensor([[bos_id]], device=device)
                 gen = raw_model.generate(input_ids, max_new_tokens=100, temperature=0.8, repetition_penalty=1.2)
                 text = tokenizer.decode(gen[0].tolist())
                 console.print(Panel(
@@ -1095,7 +1102,9 @@ def main():
                         help="Model size preset")
     parser.add_argument("--seq_len", type=int, default=None,
                         help="Override max sequence length from preset")
-    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--dropout", type=float, default=0.0,
+                        help="Dropout (default 0.0: standard for LLM pretraining; "
+                             "the FlexAttention packed path cannot apply attn dropout)")
 
     # Training
     parser.add_argument("--batch_size", type=int, default=8,

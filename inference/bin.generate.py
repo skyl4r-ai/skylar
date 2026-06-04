@@ -18,7 +18,7 @@ import sys
 import torch
 from tokenizers import Tokenizer, decoders
 
- NanoTransformer
+from models.decoder import NanoTransformer
 
 
 def load_model(path, device="auto"):

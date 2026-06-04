@@ -1074,8 +1074,12 @@ def parse_args() -> argparse.Namespace:
     )
     # LiteToken
     p.add_argument(
-        "--litetoken", default=True, action="store_true",
-        help="Enable LiteToken pruning to remove intermediate merge residues",
+        "--litetoken", default=False, action=argparse.BooleanOptionalAction,
+        help="LiteToken pruning of low-emission merges. DEFAULT OFF: it prunes "
+             "intermediate merges that are prerequisites in the BPE merge chain, "
+             "shattering whole-word tokens (e.g. 'regolamento' -> re/g/ol/a/mento, "
+             "bytes/token 5.4 -> 2.1). Opt in with --litetoken only if the prune "
+             "logic is fixed to preserve merge-chain prerequisites.",
     )
     p.add_argument(
         "--litetoken_threshold", type=float, default=DEFAULT_LITETOKEN_THRESHOLD,

@@ -89,7 +89,7 @@ try:
 except ImportError:
     HAS_ACCELERATE = False
 
-from chat_format import (
+from utils.chatML import (
     create_loss_mask,
     load_dataset_jsonl,
     encode_chatml,
@@ -254,6 +254,7 @@ class SFTDataset(Dataset):
         self.samples = []
 
         skipped = 0
+        truncated = 0
         for ex in examples:
             # Token-based loss mask: tokenize each segment separately
             # for exact boundaries (no decode/re-encode approximation)
@@ -267,9 +268,13 @@ class SFTDataset(Dataset):
                 skipped += 1
                 continue
 
-            # Truncate to max length
-            token_ids = token_ids[:max_seq_len]
-            labels = labels[:max_seq_len]
+            # Truncate to max length — keep the TAIL, not the head. Long examples
+            # must retain the final <|im_end|> label (the stop token); head
+            # truncation silently dropped it and trained the model to never stop.
+            if len(token_ids) > max_seq_len:
+                truncated += 1
+            token_ids = token_ids[-max_seq_len:]
+            labels = labels[-max_seq_len:]
 
             # Only keep examples where we have at least some assistant tokens
             if any(l != -100 for l in labels):
@@ -282,6 +287,8 @@ class SFTDataset(Dataset):
 
         if skipped > 0:
             console.print(f"  [yellow]⚠[/yellow] Skipped {skipped} examples (too short or no assistant content)")
+        if truncated > 0:
+            console.print(f"  [yellow]⚠[/yellow] Tail-truncated {truncated} examples longer than seq_len={max_seq_len} (kept the ending with <|im_end|>)")
 
     def __len__(self):
         return len(self.samples)

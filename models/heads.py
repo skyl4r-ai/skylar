@@ -17,7 +17,7 @@ This module provides additional heads for future use:
 import torch
 import torch.nn as nn
 
-from layers.norm import RMSNorm
+from models.layers.norm import RMSNorm
 
 
 class ClassificationHead(nn.Module):
