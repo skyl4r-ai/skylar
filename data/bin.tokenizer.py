@@ -1093,9 +1093,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--read_chunk_mb", type=int, default=DEFAULT_READ_CHUNK_MB)
     p.add_argument("--target_shard_mb", type=int, default=DEFAULT_TARGET_SHARD_MB)
     # S3
-    p.add_argument("--s3_bucket", default=None, help="AWS S3 bucket name (fallback: S3_BUCKET env)")
-    p.add_argument("--s3_prefix", default=None, help="Key prefix inside bucket (fallback: S3_PREFIX env)")
-    p.add_argument("--s3_region", default=None, help="AWS region (fallback: S3_REGION env, default: eu-south-1)")
+    p.add_argument("--s3_bucket", default=None, help="AWS S3 bucket name. OMIT for fully-local (default); pass explicitly to enable S3 upload. The S3_BUCKET env var is intentionally NOT used as a trigger.")
+    p.add_argument("--s3_prefix", default=None, help="Key prefix inside bucket (only used when --s3_bucket is set; env S3_PREFIX honored then).")
+    p.add_argument("--s3_region", default=None, help="AWS region (only used when --s3_bucket is set; default: eu-south-1).")
     p.add_argument(
         "--delete_local_after_upload",
         action="store_true",
@@ -1109,9 +1109,12 @@ def parse_args() -> argparse.Namespace:
     )
     args = p.parse_args()
 
-    # Resolve S3 params: CLI > env > None
-    args.s3_bucket = args.s3_bucket or os.environ.get("S3_BUCKET") or None
-    args.s3_prefix = args.s3_prefix or os.environ.get("S3_PREFIX") or None
+    # S3 is OPT-IN only: it activates solely when --s3_bucket is passed explicitly
+    # on the CLI. We intentionally do NOT fall back to the S3_BUCKET env var, so a
+    # populated .env never silently triggers an upload. Default = fully local.
+    args.s3_bucket = args.s3_bucket or None
+    # Prefix/region still honor env, but they are inert unless a bucket is set on CLI.
+    args.s3_prefix = args.s3_prefix or (os.environ.get("S3_PREFIX") if args.s3_bucket else None)
     args.s3_region = args.s3_region or os.environ.get("S3_REGION") or "eu-south-1"
 
     return args

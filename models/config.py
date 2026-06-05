@@ -155,6 +155,20 @@ PRESETS = {
         max_seq_len=16384, rope_theta=1000000.0,
     ),
 
+    # ─── MEDIUM_PLUS — spot tra medium e large, prod-usable su RTX 4090 ───
+    # ~236M params (vocab 32768, tie_weights=True) | ctx 16K | Nostro preset.
+    # Stessa width di `large` (1024) ma 18 layer (non 28): aspect dm/L=57 (large
+    # è deep-thin 37, sub-ottimale), ff/dm=2.75, GQA 4:1, head quadrate hd=64.
+    # Regime data-constrained (Muennighoff 2023): sui nostri 1.12B token unici,
+    # 4 epoche (4.48B, ~19:1 ≈ Chinchilla-matched) penalità trascurabile; 5 epoche
+    # (5.6B, ~24:1) leggero over-train per spingere la qualità (inference-optimal).
+    # RTX 4090: throughput da misurare (smoke), atteso ~70-90K tok/s con
+    # expandable_segments + bf16. Pensato anche come encoder per embeddings.
+    "medium_plus": dict(
+        d_model=1024, n_heads=16, n_kv_heads=4, n_layers=18, d_ff=2816,
+        max_seq_len=16384, rope_theta=1000000.0,
+    ),
+
     # ─── LARGE ──────────────────────────────────────────────
     # ~358M params | ctx 32K | Nostro preset, non Qwen3.
     # RTX 4090: ~19K tok/s → 7B token in ~4 giorni
@@ -162,12 +176,24 @@ PRESETS = {
     # RTX PRO 6000: ~30K tok/s → 7B token in ~3 giorni
     # 5× DGX H100: ~500K tok/s → 7B token in ~4 ore
     # Chat solida, JSON output affidabile, istruzioni complesse.
-    # Chinchilla: ~2.14B token | Noi: 1.8B (~84% del target, quasi optimal) ✅
-    # Dati .bin uint32: ~8.56 GB (target) | ~7.2 GB (1.8B)
-    # Raw stimato: ~6.4–12.8 GB (target) | ~5.4–10.8 GB (1.8B)
+    # Chinchilla: ~7.0B token (349M × 20) | a 1.8B token = solo ~26% (under-train, NON optimal)
+    # Nota: large è "deep-thin" (28 layer @ 1024 width, aspect dm/L=37). Per ~350M un
+    #       1280×18 (aspect ~71) allenerebbe più veloce. Vedi preset `gold` qui sotto.
     "large": dict(
         d_model=1024, n_heads=16, n_kv_heads=4, n_layers=28, d_ff=2816,
         max_seq_len=16384, rope_theta=5000000.0,
+    ),
+
+    # ─── GOLD — best prod-usable per RTX 4090 ───────────────
+    # ~393M params (vocab 32768) | ctx 16K | Nostro preset, ben proporzionato.
+    # d_head=128 (Qwen-style), ff/dm=2.70, aspect dm/L=64, GQA 5:1, tie_weights=True.
+    # RTX 4090: floor 6.3G, +grad-checkpointing ~10.3G → entra comodo (no OOM).
+    # Velocità stimata ~13K tok/s su 4090.
+    # Chinchilla: ~7.9B token (20×) | specialista @10×: ~4B token (~2.7 giorni).
+    # SFT chat funzionante (>125M). Inference ~0.8 GB bf16 → deployable ovunque.
+    "gold": dict(
+        d_model=1280, n_heads=10, n_kv_heads=2, d_head=128, n_layers=20, d_ff=3456,
+        max_seq_len=16384, rope_theta=1000000.0,
     ),
 
     # ─── 1B ───────────────────────────────────────────

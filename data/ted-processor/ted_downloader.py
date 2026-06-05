@@ -13,6 +13,7 @@ import json
 import logging
 import shutil
 import sys
+import tarfile
 import time
 import zipfile
 from datetime import datetime
@@ -183,22 +184,65 @@ def file_sha256(path: Path) -> str:
 # Downloader core
 # ---------------------------------------------------------------------------
 
+def detect_archive_format(file_path: Path) -> str:
+    """Detect actual archive format by reading magic bytes.
+
+    Returns: 'tar.gz', 'tar', 'zip', or 'unknown'
+    """
+    try:
+        with file_path.open("rb") as f:
+            header = f.read(512)
+    except OSError:
+        return "unknown"
+
+    if header[:2] == b"\x1f\x8b":
+        return "tar.gz"
+    if header[:4] == b"PK\x03\x04":
+        return "zip"
+    if len(header) >= 263 and header[257:262] == b"ustar":
+        return "tar"
+    return "unknown"
+
+
+def extract_archive(archive_path: Path, dest: Path) -> None:
+    """Extract any supported archive (tar.gz, tar, zip) with path traversal protection."""
+    fmt = detect_archive_format(archive_path)
+    log.info("Extracting %s (format: %s)", archive_path.name, fmt)
+
+    if fmt in ("tar.gz", "tar"):
+        mode = "r:gz" if fmt == "tar.gz" else "r:"
+        with tarfile.open(str(archive_path), mode) as tf:
+            for member in tf.getmembers():
+                resolved = (dest / member.name).resolve()
+                if not str(resolved).startswith(str(dest.resolve())):
+                    raise tarfile.TarError(f"Path traversal: {member.name}")
+            tf.extractall(dest, filter="data")
+
+    elif fmt == "zip":
+        safe_extract_zip(archive_path, dest)
+
+    else:
+        raise ValueError(f"Unknown archive format for {archive_path.name}")
+
+
 def download_package(
     client: httpx.Client,
     year: int,
     month: int,
     dest_dir: Path,
     *,
-    keep_zip: bool = False,
+    keep_archive: bool = False,
     file_progress: Progress,
 ) -> PackageStatus:
     """Download and extract a single monthly package.
 
+    Auto-detects archive format (tar.gz or zip) from magic bytes.
     Returns the resulting PackageStatus.
     """
     url = build_url(year, month)
     package_dir = dest_dir / f"{year}-{month:02d}"
-    zip_path = dest_dir / f"{year}-{month:02d}.zip"
+    # Generic temp name – format detected after download
+    archive_path = dest_dir / f"_tmp_{year}-{month:02d}.bin"
 
     # If already fully extracted, skip
     if package_dir.exists() and any(package_dir.iterdir()):
@@ -223,7 +267,7 @@ def download_package(
                 total=total,
             )
 
-            with zip_path.open("wb") as f:
+            with archive_path.open("wb") as f:
                 for chunk in resp.iter_bytes(chunk_size=CHUNK_SIZE):
                     f.write(chunk)
                     file_progress.update(task, advance=len(chunk))
@@ -232,28 +276,28 @@ def download_package(
 
     except httpx.HTTPStatusError as exc:
         log.error("HTTP %s for %s", exc.response.status_code, url)
-        zip_path.unlink(missing_ok=True)
+        archive_path.unlink(missing_ok=True)
         raise
     except httpx.TransportError as exc:
         log.error("Network error for %s: %s", url, exc)
-        zip_path.unlink(missing_ok=True)
+        archive_path.unlink(missing_ok=True)
         raise
 
-    # -- Verify ZIP ------------------------------------------------------
-    if not zipfile.is_zipfile(zip_path):
-        log.error("Invalid ZIP: %s", zip_path.name)
-        zip_path.unlink(missing_ok=True)
-        raise zipfile.BadZipFile(f"Downloaded file is not a valid ZIP: {zip_path}")
+    # -- Detect format & extract -----------------------------------------
+    fmt = detect_archive_format(archive_path)
+    if fmt == "unknown":
+        log.error("Unknown archive format for %s", archive_path.name)
+        archive_path.unlink(missing_ok=True)
+        raise ValueError(f"Downloaded file is not a valid archive: {archive_path}")
 
-    # -- Extract ---------------------------------------------------------
-    log.info("Extracting %s …", zip_path.name)
-    safe_extract_zip(zip_path, package_dir)
+    log.info("Extracting %s (detected: %s) …", archive_path.name, fmt)
+    extract_archive(archive_path, package_dir)
 
-    sha = file_sha256(zip_path)
-    log.debug("SHA-256 %s: %s", zip_path.name, sha)
+    sha = file_sha256(archive_path)
+    log.debug("SHA-256: %s", sha)
 
-    if not keep_zip:
-        zip_path.unlink(missing_ok=True)
+    if not keep_archive:
+        archive_path.unlink(missing_ok=True)
 
     return PackageStatus.EXTRACTED
 
@@ -341,7 +385,7 @@ def download(
         2.0, "--delay", help="Seconds to wait between downloads (rate-limiting)."
     ),
     max_retries: int = typer.Option(3, "--retries", "-r", help="Max retry attempts per package."),
-    keep_zip: bool = typer.Option(False, "--keep-zip", help="Keep ZIP files after extraction."),
+    keep_archive: bool = typer.Option(False, "--keep-archive", help="Keep archive files after extraction."),
     retry_failed: bool = typer.Option(
         True, "--retry-failed/--skip-failed", help="Retry previously failed packages."
     ),
@@ -388,7 +432,7 @@ def download(
         (f"Dest     : {dest.resolve()}\n", "cyan"),
         (f"Delay    : {delay}s between requests\n", "cyan"),
         (f"Retries  : {max_retries}\n", "cyan"),
-        (f"Keep ZIP : {'yes' if keep_zip else 'no'}", "cyan"),
+        (f"Keep arc : {'yes' if keep_archive else 'no'}", "cyan"),
     )
     console.print(Panel(banner, border_style="blue", padding=(1, 2)))
 
@@ -418,7 +462,7 @@ def download(
     overall_task = overall_progress.add_task("Downloading", total=len(to_download))
 
     # -- HTTP client -----------------------------------------------------
-    headers = {"User-Agent": USER_AGENT, "Accept-Encoding": "gzip, deflate"}
+    headers = {"User-Agent": USER_AGENT, "Accept-Encoding": "identity"}
     transport = httpx.HTTPTransport(retries=2)
 
     with httpx.Client(
@@ -453,7 +497,7 @@ def download(
                             year,
                             month,
                             dest,
-                            keep_zip=keep_zip,
+                            keep_archive=keep_archive,
                             file_progress=file_progress,
                         )
                         last_error = ""
@@ -461,7 +505,9 @@ def download(
                     except (
                         httpx.HTTPStatusError,
                         httpx.TransportError,
+                        tarfile.TarError,
                         zipfile.BadZipFile,
+                        ValueError,
                         OSError,
                     ) as exc:
                         last_error = f"{type(exc).__name__}: {exc}"

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # filepath: test_ted_processor.py
-"""Verify TED processor parsers with synthetic data."""
+"""Tests for TED processor — based on real TED data format."""
 
 import tempfile
 from pathlib import Path
@@ -10,77 +10,58 @@ from ted_processor import (
     FormatEra,
     clean_text,
     detect_format,
+    is_italian_file,
     parse_legacy_txt,
-    parse_xml_eforms,
-    parse_xml_old,
+    parse_xml_ted,
     write_pretrain_batch,
 )
 
-LEGACY_NOTICE_IT = """\
-ND: 1993001-0042
+IT_NOTICE_FILE = """\
+  **********************************************
+  ***  T E D   D A I L Y - D E L I V E R Y   ***
+  ***  ( ITALIAN   - VERSION)                ***
+  **********************************************
+
+1.00/067191
+TI: I-Napoli: pasti
+PD: 19930102
+ND: 54411-1992
 CY: IT
-TI: Lavori di ristrutturazione del palazzo comunale di Roma
-AB: Il Comune di Roma indice gara pubblica per la ristrutturazione integrale del palazzo comunale sito in Via del Corso.
-TX: Importo complessivo dei lavori: 2.500.000 ECU. Durata prevista: 18 mesi. Le offerte devono pervenire entro il 15 marzo 1993.
+AU: UNITA SANITARIA LOCALE N. 43
+AB: Merce: Confezionamento di pasti freddi per il personale e pasti
+    caldi per i degenti.
+    Valore base: Lit 700 000 000, IVA inclusa.
+TX: 1. Ente appaltante: Unita sanitaria locale n. 43, via Valente (rione
+    Miano) I-80145 Napoli.
+    Tel. 754 06 05.
+    2. Procedura: Gara ristretta.
+
+1.00/067190
+TI: I-Roma: lavori stradali
+PD: 19930102
+ND: 54412-1992
+CY: IT
+AU: COMUNE DI ROMA
+AB: Lavori di manutenzione straordinaria.
+TX: 1. Ente appaltante: Comune di Roma.
+    2. Importo: Lit 2 500 000 000.
 """
 
-LEGACY_NOTICE_DE = """\
-ND: 1993001-0043
-CY: DE
-TI: Bauarbeiten in Berlin
-AB: Renovierung eines Bürogebäudes
-TX: Gesamtbetrag: 1.000.000 ECU
-"""
-
-XML_OLD_NOTICE = """\
+XML_NOTICE_IT = """\
 <?xml version="1.0" encoding="UTF-8"?>
-<TED_EXPORT xmlns="http://publications.europa.eu/resource/schema/ted/R2.0.9/publication" DOC_ID="123456-2019" EDITION="2019001">
-  <CODED_DATA_SECTION>
-    <NOTICE_DATA>
-      <ISO_COUNTRY VALUE="IT"/>
-    </NOTICE_DATA>
-  </CODED_DATA_SECTION>
+<TED_EXPORT xmlns="http://publications.europa.eu/resource/schema/ted/R2.0.9/publication" DOC_ID="123456-2019">
   <TRANSLATION_SECTION>
     <ML_TITLES>
       <ML_TI_DOC LG="IT">
-        <TI_CY>Italia</TI_CY>
-        <TI_TOWN>Roma</TI_TOWN>
         <TI_TEXT><P>Appalto per servizi di consulenza informatica</P></TI_TEXT>
       </ML_TI_DOC>
     </ML_TITLES>
   </TRANSLATION_SECTION>
   <FORM_SECTION>
-    <F02_2014 CATEGORY="TRANSLATION" FORM="F02" LG="IT">
+    <F02_2014 LG="IT">
       <OBJECT_CONTRACT>
         <TITLE><P>Appalto per servizi di consulenza informatica</P></TITLE>
-        <SHORT_DESCR><P>Il Ministero delle Finanze cerca un fornitore per servizi di consulenza informatica per la modernizzazione dei sistemi IT.</P></SHORT_DESCR>
-      </OBJECT_CONTRACT>
-      <COMPLEMENTARY_INFO>
-        <INFO_ADD><P>Le offerte devono essere presentate entro 60 giorni dalla pubblicazione.</P></INFO_ADD>
-      </COMPLEMENTARY_INFO>
-    </F02_2014>
-    <F02_2014 CATEGORY="ORIGINAL" FORM="F02" LG="EN">
-      <OBJECT_CONTRACT>
-        <TITLE><P>IT consulting services contract</P></TITLE>
-        <SHORT_DESCR><P>The Ministry of Finance seeks an IT consulting provider.</P></SHORT_DESCR>
-      </OBJECT_CONTRACT>
-    </F02_2014>
-  </FORM_SECTION>
-</TED_EXPORT>
-"""
-
-XML_OLD_NOTICE_NO_IT = """\
-<?xml version="1.0" encoding="UTF-8"?>
-<TED_EXPORT xmlns="http://publications.europa.eu/resource/schema/ted/R2.0.9/publication" DOC_ID="789012-2019">
-  <CODED_DATA_SECTION>
-    <NOTICE_DATA>
-      <ISO_COUNTRY VALUE="DE"/>
-    </NOTICE_DATA>
-  </CODED_DATA_SECTION>
-  <FORM_SECTION>
-    <F02_2014 CATEGORY="ORIGINAL" FORM="F02" LG="DE">
-      <OBJECT_CONTRACT>
-        <TITLE><P>Beratungsvertrag</P></TITLE>
+        <SHORT_DESCR><P>Il Ministero cerca un fornitore IT.</P></SHORT_DESCR>
       </OBJECT_CONTRACT>
     </F02_2014>
   </FORM_SECTION>
@@ -89,76 +70,64 @@ XML_OLD_NOTICE_NO_IT = """\
 
 
 def test_legacy_parser():
-    """Test legacy TXT notice parser."""
     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
-        f.write(LEGACY_NOTICE_IT)
-        f.write("\n\n")
-        f.write(LEGACY_NOTICE_DE)
+        f.write(IT_NOTICE_FILE)
         path = Path(f.name)
 
     docs = parse_legacy_txt(path)
     path.unlink()
 
-    assert len(docs) == 1, f"Expected 1 IT doc, got {len(docs)}"
-    doc = docs[0]
-    assert "ristrutturazione" in doc.title, f"Title missing expected text: {doc.title}"
-    assert "Comune di Roma" in doc.abstract, f"Abstract missing: {doc.abstract}"
-    assert "2.500.000" in doc.body, f"Body missing: {doc.body}"
+    assert len(docs) == 2, f"Expected 2 docs, got {len(docs)}"
+    assert "Napoli" in docs[0].title
+    assert "pasti freddi" in docs[0].abstract
+    assert "Unita sanitaria" in docs[0].body
+    assert "Roma" in docs[1].title
     print("✓ Legacy TXT parser: OK")
 
 
-def test_xml_old_parser():
-    """Test old XML format parser."""
+def test_xml_parser():
     with tempfile.NamedTemporaryFile(mode="w", suffix=".xml", delete=False, encoding="utf-8") as f:
-        f.write(XML_OLD_NOTICE)
+        f.write(XML_NOTICE_IT)
         path = Path(f.name)
 
-    docs = parse_xml_old(path)
+    docs = parse_xml_ted(path)
     path.unlink()
 
-    assert len(docs) == 1, f"Expected 1 doc, got {len(docs)}"
-    doc = docs[0]
-    assert "consulenza informatica" in doc.title, f"Title: {doc.title}"
-    assert "Ministero delle Finanze" in doc.abstract, f"Abstract: {doc.abstract}"
-    print("✓ XML old parser: OK")
-
-
-def test_xml_old_no_italian():
-    """Test that non-Italian XML notices are skipped."""
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".xml", delete=False, encoding="utf-8") as f:
-        f.write(XML_OLD_NOTICE_NO_IT)
-        path = Path(f.name)
-
-    docs = parse_xml_old(path)
-    path.unlink()
-
-    assert len(docs) == 0, f"Expected 0 docs (non-IT), got {len(docs)}"
-    print("✓ XML old parser (non-IT skip): OK")
+    assert len(docs) == 1
+    assert "consulenza informatica" in docs[0].title
+    assert "Ministero" in docs[0].abstract
+    print("✓ XML parser: OK")
 
 
 def test_format_detection():
-    """Test format detection."""
     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
-        f.write(LEGACY_NOTICE_IT)
+        f.write(IT_NOTICE_FILE)
         path = Path(f.name)
     assert detect_format(path) == FormatEra.LEGACY_TXT
     path.unlink()
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".xml", delete=False, encoding="utf-8") as f:
-        f.write(XML_OLD_NOTICE)
+        f.write(XML_NOTICE_IT)
         path = Path(f.name)
-    assert detect_format(path) == FormatEra.XML_OLD
+    assert detect_format(path) == FormatEra.XML_TED
     path.unlink()
     print("✓ Format detection: OK")
 
 
-def test_pretrain_output():
-    """Test pretrain.txt output format."""
-    docs = [
-        ExtractedDoc(doc_id="test-001", title="Titolo Test", abstract="Abstract test", body="Corpo del documento"),
-        ExtractedDoc(doc_id="test-002", title="Secondo Doc", body="Altro testo"),
-    ]
+def test_italian_file_detection():
+    assert is_italian_file(Path("IT_19930102_1993001_ISO_ORG"))
+    assert is_italian_file(Path("it_20100102_001_utf8_org"))
+    assert not is_italian_file(Path("EN_19930102_1993001_ISO_ORG"))
+    assert not is_italian_file(Path("FR_19950103_001_ISO_ORG"))
+    assert not is_italian_file(Path("000005-2015.xml"))
+    print("✓ Italian file detection: OK")
 
+
+def test_pretrain_output():
+    docs = [
+        ExtractedDoc(doc_id="t1", title="Titolo", abstract="Riassunto", body="Corpo"),
+        ExtractedDoc(doc_id="t2", title="Secondo", body="Altro testo"),
+    ]
     with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as f:
         path = Path(f.name)
 
@@ -166,15 +135,14 @@ def test_pretrain_output():
     content = path.read_text(encoding="utf-8")
     path.unlink()
 
-    assert content.count("<bos>") == 2, f"Expected 2 <bos> markers"
-    assert content.count("<eos>") == 2, f"Expected 2 <eos> markers"
-    assert "Titolo Test" in content
-    assert "Secondo Doc" in content
-    print("✓ Pretrain output format: OK")
+    assert content.count("<bos>") == 2
+    assert content.count("<eos>") == 2
+    assert "Titolo" in content
+    assert "Riassunto" in content
+    print("✓ Pretrain output: OK")
 
 
 def test_clean_text():
-    """Test text cleaning."""
     dirty = '  <P>Hello   \x00  world</P>\n\n\n\nfoo  '
     clean = clean_text(dirty)
     assert "\x00" not in clean
@@ -183,11 +151,30 @@ def test_clean_text():
     print("✓ Text cleaning: OK")
 
 
+def test_real_file():
+    """Test against the real uploaded EN file (if available)."""
+    real = Path("/mnt/user-data/uploads/1772385631691_EN_19930102_1993001_ISO_ORG")
+    if not real.exists():
+        print("⊘ Real file test: skipped (file not available)")
+        return
+
+    docs = parse_legacy_txt(real)
+    assert len(docs) == 199, f"Expected 199 notices, got {len(docs)}"
+
+    # Verify no garbage in titles
+    for doc in docs[:10]:
+        assert not doc.title.startswith("1.0"), f"Separator leaked into title: {doc.title[:50]}"
+        assert len(doc.title) > 5, f"Title too short: {doc.title}"
+
+    print(f"✓ Real file test: {len(docs)} notices parsed correctly")
+
+
 if __name__ == "__main__":
     test_format_detection()
+    test_italian_file_detection()
     test_legacy_parser()
-    test_xml_old_parser()
-    test_xml_old_no_italian()
+    test_xml_parser()
     test_pretrain_output()
     test_clean_text()
+    test_real_file()
     print("\n🎉 All tests passed!")

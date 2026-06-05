@@ -26,7 +26,7 @@ import torch
 from pathlib import Path
 from tokenizers import Tokenizer, decoders
 
- NanoTransformer
+from models.decoder import NanoTransformer
 
 
 # ─────────────────────────────────────────────────────────────

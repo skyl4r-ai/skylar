@@ -99,6 +99,14 @@ class Journal:
         self._docs_dir = self._cache_dir / "docs"
         self._journal_path = self._cache_dir / "journal.json"
         self._entries: dict[str, JournalEntry] = {}  # abs_path → entry
+        # Batched persistence: rewriting the full journal.json after EVERY store()
+        # is O(N²) (N full rewrites of a file that grows to N entries) — it grinds
+        # large runs to a halt (233k files → ~14h instead of ~minutes). Save every
+        # _save_every stores instead; the builder calls save() once at the end to
+        # flush the remainder. Per-file .jsonl cache is always written, so a crash
+        # only loses up to _save_every index entries (those files reprocess next run).
+        self._save_every = 2000
+        self._pending_stores = 0
 
         if self.enabled:
             self._cache_dir.mkdir(parents=True, exist_ok=True)
@@ -214,8 +222,11 @@ class Journal:
             timestamp=time.time(),
         )
 
-        # Progressive save — persist after every file
-        self.save()
+        # Batched save — persist every _save_every stores, not every file (O(N²) fix).
+        self._pending_stores += 1
+        if self._pending_stores >= self._save_every:
+            self.save()
+            self._pending_stores = 0
 
     # ── Stats ──────────────────────────────────────────────────────
 

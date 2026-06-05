@@ -116,6 +116,74 @@ def _pct(a: int, b: int) -> str:
     return f"{a / b * 100:.1f}%" if b else "—"
 
 
+# Formats where one file == one document, so a giant file == a giant single doc.
+# JSONL (one doc per line) and TXT (streamed/curated) must NOT be size-skipped.
+SIZE_LIMITED_FORMATS: set[str] = {"json", "html", "htm", "xml", "pdf"}
+
+
+def _apply_source_limits(
+        file_map: dict[str, list[Path]],
+        max_file_mb: float,
+        max_source_gb: float,
+        seed: int,
+) -> tuple[dict[str, list[Path]], int, int]:
+    """Drop oversize single-doc files and optionally cap total source bytes.
+
+    ``max_file_mb`` skips files larger than the cap, but ONLY for formats where
+    one file == one document (json/html/xml/pdf) — this is the guard against
+    giant single docs (343MB leggi, 400MB EUR-Lex HTML) that OOM/stall the
+    filters. JSONL/TXT stream per-line/per-file and are never size-skipped.
+
+    ``max_source_gb`` randomly samples discovered files (seeded by ``seed``)
+    until the cumulative source size reaches the cap — used for per-domain
+    volume balancing (e.g. cap 92GB normattiva to 12GB).
+
+    Returns ``(new_file_map, n_dropped_oversize, n_capped_out)``.
+    """
+    n_dropped = 0
+    if max_file_mb > 0:
+        cap = int(max_file_mb * 1024 ** 2)
+        for fmt in list(file_map):
+            if fmt not in SIZE_LIMITED_FORMATS:
+                continue
+            kept: list[Path] = []
+            for f in file_map[fmt]:
+                try:
+                    too_big = f.stat().st_size > cap
+                except OSError:
+                    too_big = False
+                if too_big:
+                    n_dropped += 1
+                else:
+                    kept.append(f)
+            file_map[fmt] = kept
+
+    n_capped = 0
+    if max_source_gb > 0:
+        cap = int(max_source_gb * 1024 ** 3)
+        flat: list[tuple[str, Path, int]] = []
+        for fmt, files in file_map.items():
+            for f in files:
+                try:
+                    flat.append((fmt, f, f.stat().st_size))
+                except OSError:
+                    continue
+        rng = np.random.default_rng(seed)
+        order = rng.permutation(len(flat))
+        selected: dict[str, list[Path]] = {fmt: [] for fmt in file_map}
+        total = 0
+        for idx in order:
+            fmt, f, sz = flat[int(idx)]
+            if total >= cap:
+                n_capped += 1
+                continue
+            selected[fmt].append(f)
+            total += sz
+        file_map = {fmt: fs for fmt, fs in selected.items() if fs}
+
+    return file_map, n_dropped, n_capped
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Chunk writer
 # ──────────────────────────────────────────────────────────────────────
@@ -839,6 +907,22 @@ def build(
         ),
         seed: int = typer.Option(42, "--seed"),
         max_gb: float = typer.Option(1.0, "--max-gb", help="Max size per output chunk in GB."),
+        max_file_mb: float = typer.Option(
+            0.0, "--max-file-mb",
+            help=(
+                "Skip source files larger than this many MB (json/html/xml/pdf only). "
+                "0 = no limit. Guards against giant single-document files "
+                "(e.g. 343MB leggi, 400MB EUR-Lex HTML) that OOM/stall the filters."
+            ),
+        ),
+        max_source_gb: float = typer.Option(
+            0.0, "--max-source-gb",
+            help=(
+                "Cap total source size by randomly sampling discovered files "
+                "(seeded by --seed) until this many GB. 0 = no limit. "
+                "Use for per-domain volume balancing."
+            ),
+        ),
         config: Path | None = typer.Option(
             None, "--config", "-c",
             help="YAML config for pipeline thresholds.",
@@ -882,7 +966,7 @@ def build(
             help="Max fraction of number tokens per chunk (0-1).",
         ),
         gpu_perplexity: bool = typer.Option(
-            True, "--gpu-perplexity",
+            True, "--gpu-perplexity/--no-gpu-perplexity",
             help="Enable GPU perplexity scoring (requires torch + transformers).",
         ),
         perplexity_model: str = typer.Option(
@@ -932,6 +1016,24 @@ def build(
         console.print(
             f"[bold red]Error:[/] No supported files found in {source}"
         )
+        raise typer.Exit(code=1)
+
+    # ── Source limits (giant-doc skip + per-domain volume cap) ────
+    file_map, n_dropped_big, n_capped = _apply_source_limits(
+        file_map, max_file_mb, max_source_gb, seed,
+    )
+    if n_dropped_big:
+        console.print(
+            f"  [yellow]↳[/] Skipped {n_dropped_big:,} oversize file(s) "
+            f"(> {max_file_mb:.0f} MB)"
+        )
+    if n_capped:
+        console.print(
+            f"  [yellow]↳[/] Source cap {max_source_gb:.1f} GB: "
+            f"dropped {n_capped:,} file(s) beyond budget"
+        )
+    if not any(file_map.values()):
+        console.print("[bold red]Error:[/] No files left after applying source limits.")
         raise typer.Exit(code=1)
 
     # ── Pipeline config ───────────────────────────────────────────
@@ -1008,6 +1110,10 @@ def build(
     banner.add_row("[bold]Source", str(source.resolve()))
     banner.add_row("[bold]Output", str(output.resolve()))
     banner.add_row("[bold]Max chunk", _fmt_bytes(max_chunk_bytes))
+    if max_file_mb > 0:
+        banner.add_row("[bold]Max file", f"{max_file_mb:.0f} MB [dim](json/html/xml/pdf)[/]")
+    if max_source_gb > 0:
+        banner.add_row("[bold]Source cap", f"{max_source_gb:.1f} GB [dim](sampled, seed {seed})[/]")
     banner.add_row("[bold]Seed", str(seed))
     if journal.enabled:
         banner.add_row(
@@ -1102,6 +1208,9 @@ def build(
         journal=journal,
         typo_detector=typo_det,
     )
+
+    # Flush any batched journal entries not yet persisted (see Journal._save_every).
+    journal.save()
 
     if len(all_docs) == 0:
         console.print("[bold red]No documents survived the pipeline. Exiting.[/]")
