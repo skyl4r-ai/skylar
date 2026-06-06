@@ -100,14 +100,14 @@ python inference/bin.chat.py --model checkpoints_sft/best
 
 <br>
 
-## 📊 Model Family — 12 Presets, 5 Orders of Magnitude
+## 📊 Model Family — 15 Presets, 5 Orders of Magnitude
 
 ```
   6M ──────────────────────────────────────────────────── 128B
   │                                                        │
-  test    small   medium   large    1B    4B   8B  14B  32B  64B  96B  128B
-  │         │       │       │      │     │    │    │    │    │    │     │
-  CPU    RTX4090  RTX4090  H100  H100  DGX  DGX  DGX  DGX  DGX  DGX  DGX
+ test  small  medium  medium+  gold  large  1B  4B  8B  14B  32B  64B  96B  128B
+  │      │       │        │      │     │    │   │   │    │    │    │    │     │
+ CPU  RTX4090 RTX4090 RTX4090 RTX4090 H100 H100 DGX DGX  DGX  DGX  DGX  DGX  DGX
 ```
 
 <details>
@@ -121,7 +121,9 @@ python inference/bin.chat.py --model checkpoints_sft/best
 | `small`  |  **~40M**  |   512   |   8   |    4     |   64   |   8    | 1024  |   8K    |  500K  |      —      |
 | `small+` |  **~70M**  |   640   |  10   |    5     |   64   |   10   | 1792  |   16K   |   1M   |      —      |
 | `medium` | **~107M**  |   768   |  12   |    4     |   64   |   12   | 2048  |   16K   |   1M   |      —      |
+| `medium+`| **~236M**  |  1024   |  16   |    4     |   64   |   18   | 2816  |   16K   |   1M   |   ⭐ prod   |
 | `large`  | **~358M**  |  1024   |  16   |    4     |   64   |   28   | 2816  |   16K   |   5M   |      —      |
+| `gold`   | **~393M**  |  1280   |  10   |    2     |  128   |   20   | 3456  |   16K   |   1M   |      —      |
 |   `1B`   | **~1.0B**  |  1536   |  16   |    4     |   96   |   32   | 5120  |   32K   |   5M   |      —      |
 |   `4b`   | **~3.6B**  |  2560   |  32   |    8     |  128   |   36   | 9728  |   32K   |   1M   | ✅ Qwen3-4B  |
 |   `8b`   | **~7.3B**  |  4096   |  32   |    8     |  128   |   36   | 12288 |   32K   |   1M   | ✅ Qwen3-8B  |
@@ -138,19 +140,79 @@ python inference/bin.chat.py --model checkpoints_sft/best
 
 <br>
 
-## 🔄 Three-Stage Training Pipeline
+## 🔄 Training Pipeline — one base, many products
+
+One pretrained decoder backbone feeds an entire post-training suite. All
+discriminative/retrieval heads reuse the same weights via `from_decoder()` — **no
+re-pretraining**.
 
 ```
- ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
- │  📚 STAGE 1 │     │  💬 STAGE 2 │     │  🎯 STAGE 3 │
- │  Pretrain    │────►│  SFT        │────►│  DPO        │
- │             │     │             │     │  (planned)   │
- └──────┬──────┘     └──────┬──────┘     └─────────────┘
-        │                   │
-   Causal LM on        ChatML format
-   raw text             + loss masking
-   (packed seqs)        (assistant only)
+                          ┌──────────────────────┐
+                          │   📚 PRETRAIN (base)  │  causal LM on raw text
+                          └───────────┬──────────┘
+              ┌───────────────┬───────┴───────┬────────────────┐
+              ▼               ▼               ▼                ▼
+      ┌──────────────┐ ┌─────────────┐ ┌──────────────┐ ┌──────────────┐
+      │ 💬 SFT (chat)│ │ 🔎 EMBEDDER │ │ 🧮 SPARSE    │ │ 🏷️ CLASSIFIER │
+      │  ChatML      │ │  dense      │ │  SPLADE      │ │  BERT-style   │
+      │  + ORPO/SimPO│ │ (InfoNCE)   │ │ (FLOPS reg)  │ │  (CE)         │
+      └──────────────┘ └─────────────┘ └──────────────┘ └──────────────┘
+        generative       dense vec       sparse vec       class logits
+                          └────── hybrid retrieval ──────┘ (Qdrant)
 ```
+
+| Stage | Script | Output |
+|:--|:--|:--|
+| **Pretrain** | `training/bin.pretrain.py` | causal-LM base |
+| **SFT** | `training/bin.sft.py` | ChatML chat model (assistant-only loss) |
+| **Preference** | `training/bin.preference.py` | ORPO / SimPO (reference-free, replaces DPO) |
+| **Dense embedder** | `training/bin.contrastive.py` | `SkylarEmbedder` (InfoNCE) |
+| **Sparse retriever** | `training/bin.sparse.py` | `SkylarSparseEncoder` (SPLADE) |
+| **Classifier** | `training/bin.classify.py` | `SkylarClassifier` (sequence classification) |
+
+See [`docs/POSTTRAIN.md`](docs/POSTTRAIN.md) for the full recipe.
+
+<br>
+
+## 📈 Validated Results — `medium_plus` (236M)
+
+Trained from scratch on **1.12B tokens** of Italian legal/normative text (4 epochs, ~19h on a single
+RTX 4090), then the full post-training suite. All four products come from the **same 236M weights**.
+
+| Product | Metric |
+|:--|:--|
+| **Base LM** | val loss **2.16** · health-check perplexity **15.4** |
+| **Chat (SFT)** | grounded tasks **6/6 correct** (answer-from-context, classify, extract-JSON, refuse-when-absent) · clean stop **6/6** grounded, **12/13** full battery |
+| **Dense embedder** | SQuAD-it test R@1 **0.55** · nDCG@10 **0.71** (open-domain) · R@1 **0.93** in-domain |
+| **Sparse (SPLADE)** | Recall@1 **1.000** · ~5 non-zeros/query · interpretable lexical weights (in-domain) |
+| **Classifier** | intent accuracy **1.00** (5-way banking, held-out) |
+
+**Public Italian generative benchmarks** (likelihood-based MC, `eval/bench_ita.py`):
+
+| | medium (100M) | **medium_plus (236M)** | random |
+|:--|:--:|:--:|:--:|
+| XCOPA-it (causal commonsense) | 0.546 | **0.562** ⭐ | 0.50 |
+| HellaSwag-it | 0.279 | 0.292 | 0.25 |
+| Belebele-it | 0.244 | 0.267 | 0.25 |
+
+**Retrieval vs off-the-shelf SOTA** — `eval/bench_retrieval.py`, SQuAD-it test (7609 queries / 1988 contexts,
+identical pool & metrics for every model). The Skylar embedder is the 236M base + a cheap contrastive
+fine-tune on Italian QA; bge-m3 and e5 are evaluated zero-shot:
+
+| Model | Params | R@1 | R@5 | nDCG@10 |
+|:--|:--:|:--:|:--:|:--:|
+| Skylar-embed (IT-QA fine-tune) | **236M** | 0.55 | 0.81 | 0.71 |
+| `intfloat/multilingual-e5-base` | 278M | 0.71 | 0.91 | 0.83 |
+| `BAAI/bge-m3` | 568M | 0.70 | 0.90 | 0.83 |
+
+> **Honest scope — what's real and declarable.** The 236M base is a **grounded Italian RAG model**, not a
+> factual oracle: in its intended role it scores **6/6** (answer/extract/classify/refuse-from-context) with
+> clean stopping, but it **hallucinates open-domain facts** and the knowledge-heavy benchmarks sit near random,
+> as expected for the size. It is an **Italian specialist** — English generation is not fluent (Italian-only
+> corpus). The from-scratch retriever reaches **~78% of the R@1 and ~86% of the nDCG** of `bge-m3` (which is
+> **2.4× larger**) while running fully **local/offline** from the same base; it does **not** beat the
+> multilingual SOTA on accuracy — its edge is **size, locality and a one-base gen+dense+sparse+classifier
+> stack**. The retrieval gap traces to the narrow 1.12B-token pretrain, not the contrastive recipe.
 
 ### Stage 1 — Pre-Training
 
@@ -339,10 +401,12 @@ self-hosted vLLM endpoints as teacher models.
 </td>
 <td>
 
-### 🌍 Bilingual Italian/English
+### 🌍 Italian-specialist
 
-Custom 40,960 BPE vocabulary optimized for Italian and English. Special tokens for chat (`<|im_start|>`, `<|im_end|>`),
-thinking (`<think>`), and tool use (`<tool_call>`).
+Configurable ByteLevel BPE (the released `medium_plus` uses a **32,768** vocab trained on Italian
+legal/normative text). Special tokens for chat (`<|im_start|>`, `<|im_end|>`), thinking (`<think>`), and tool use
+(`<tool_call>`). The vocabulary supports English byte-level, but a model trained on an Italian-only corpus is an
+**Italian specialist** — English generation is not fluent unless English data is added to pretraining.
 
 </td>
 </tr>
@@ -410,7 +474,7 @@ python data/bin.tokenizer.py \
 | Feature       | Detail                                                |
 |:--------------|:------------------------------------------------------|
 | **Algorithm** | ByteLevel BPE (HuggingFace `tokenizers`, Rust-backed) |
-| **Vocab**     | 40,960 tokens (bilingual IT/EN)                       |
+| **Vocab**     | configurable (default 40,960; `medium_plus` uses 32,768) |
 | **Output**    | Sharded uint32 `.bin` files (1GB each)                |
 | **Checksums** | SHA256 per shard + JSON metadata                      |
 | **Upload**    | Auto S3 multipart transfer                            |
@@ -527,13 +591,18 @@ The script handles everything:
 - [x] 💬 SFT with ChatML + loss masking
 - [x] 🎙️ Interactive streaming chat REPL
 - [x] 🤖 Agentic synthetic data generation
-- [x] 🔍 SkylarEmbedder (bidirectional, for retrieval)
+- [x] 🔍 SkylarEmbedder (bidirectional dense retrieval)
+- [x] 🔗 Contrastive training for the embedder (InfoNCE)
+- [x] 🧮 Sparse retrieval — SkylarSparseEncoder (SPLADE-style)
+- [x] 🏷️ SkylarClassifier (BERT-style sequence classification)
+- [x] 🎯 Preference optimization — ORPO / SimPO (reference-free; supersedes DPO)
+- [x] 🧪 Public Italian benchmarks (XCOPA / HellaSwag / Belebele)
 - [x] 📊 Evaluation & diagnostic tools
-- [ ] 🎯 DPO (Direct Preference Optimization)
-- [ ] 🔗 Contrastive training for embedder
 - [ ] 🌐 FastAPI/vLLM inference server
 - [ ] 📦 Push-to-Hub support
-- [ ] 🧪 MMLU / HellaSwag / ARC benchmarks
+- [ ] 🔭 Long-context: sliding-window attention + YaRN (for 8K+)
+- [ ] 🌊 Streaming/memmap dataset (required for 4B/8B scale)
+- [ ] 🎯 Classic DPO (optional; `bin.preference.py` covers the reference-free variants)
 
 <br>
 
@@ -542,6 +611,8 @@ The script handles everything:
 | Document                                         | Description                                     |
 |:-------------------------------------------------|:------------------------------------------------|
 | [`docs/PAPER.md`](docs/PAPER.md)                 | Full technical paper — Skylar v3.0 architecture |
+| [`docs/RESULTS.md`](docs/RESULTS.md)             | **Validated results** — public benchmarks + retrieval vs bge-m3 / e5 |
+| [`docs/POSTTRAIN.md`](docs/POSTTRAIN.md)         | Post-training suite — chat, embeddings, sparse, classifier |
 | [`docs/GUIDE.md`](docs/GUIDE.md)                 | Step-by-step training guide                     |
 | [`docs/STRUCTURE.md`](docs/STRUCTURE.md)       | Codebase structure reference                    |
 | [`docs/DISTILLATION.md`](docs/DISTILLATION.md) | Synthetic data distillation guide               |

@@ -51,3 +51,13 @@ skylar.egg-info
 
 # ENV FILES
 .env
+
+# ══════════════════════════════════════════════════
+#  Working dirs — NEVER publish weights, corpora, local notes
+#  (weight files are ignored above; this also blocks the
+#   config.json / tokenizer.json / *.jsonl that surface the dirs)
+# ══════════════════════════════════════════════════
+/checkpoints/
+/checkpoints_*/
+/.datasets/
+/CLAUDE.md

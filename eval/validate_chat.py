@@ -38,6 +38,17 @@ TESTS = [
     ("stop_stress", DEFAULT_SYSTEM, "Ciao!"),
 ]
 
+# English probes — the model is an ITALIAN specialist; this is the honest
+# cross-lingual check (expected: degraded / non-fluent English).
+EN_SYSTEM = "You are Skylar, a helpful assistant. Answer clearly and concisely."
+EN_TESTS = [
+    ("en_general",  EN_SYSTEM, "What is the capital of Italy? Answer in one sentence."),
+    ("en_banking",  EN_SYSTEM, "What does the EU PSD2 directive regulate?"),
+    ("en_instruct", EN_SYSTEM, "List three primary colors."),
+    ("en_convo",    EN_SYSTEM, "Hi! Can you briefly explain how a mortgage works?"),
+    ("en_stop",     EN_SYSTEM, "Hello!"),
+]
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -47,7 +58,11 @@ def main():
     ap.add_argument("--top_k", type=int, default=50)
     ap.add_argument("--top_p", type=float, default=0.9)
     ap.add_argument("--repetition_penalty", type=float, default=1.15)
+    ap.add_argument("--lang", choices=["it", "en", "both"], default="it",
+                    help="which prompt battery to run (en = cross-lingual honesty check)")
     args = ap.parse_args()
+
+    tests = {"it": TESTS, "en": EN_TESTS, "both": TESTS + EN_TESTS}[args.lang]
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Loading {args.model} on {device} ...")
@@ -60,9 +75,9 @@ def main():
     eos_ids = [i for i in (im_end, tok.token_to_id("<|endoftext|>"), tok.token_to_id("<eos>")) if i is not None]
 
     n_stopped = 0
-    n_total = len(TESTS)
+    n_total = len(tests)
     print("=" * 78)
-    for label, system, user in TESTS:
+    for label, system, user in tests:
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         ids = encode_chatml(messages, tok, add_generation_prompt=True)
         input_ids = torch.tensor([ids], device=device)

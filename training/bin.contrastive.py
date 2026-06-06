@@ -42,12 +42,17 @@ from models.embedder import SkylarEmbedder
 class PairDS(Dataset):
     def __init__(self, path):
         self.rows = []
+        g2i = {}
         with open(path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line:
                     o = json.loads(line)
-                    self.rows.append((o["query"], o["positive"]))
+                    # group = "which positive is this": queries that share a gold
+                    # positive must NOT be in-batch negatives of each other.
+                    g = o.get("group", o["positive"])
+                    gi = g2i.setdefault(g, len(g2i))
+                    self.rows.append((o["query"], o["positive"], gi))
 
     def __len__(self):
         return len(self.rows)
@@ -71,14 +76,22 @@ def make_collate(tok, max_len, pad_id):
     def collate(batch):
         q = [b[0] for b in batch]
         p = [b[1] for b in batch]
-        return encode_batch(q), encode_batch(p)
+        groups = torch.tensor([b[2] for b in batch], dtype=torch.long)
+        return encode_batch(q), encode_batch(p), groups
     return collate
 
 
-def info_nce(q_emb, p_emb, temperature, symmetric=True):
+def info_nce(q_emb, p_emb, temperature, groups=None, symmetric=True):
     # q_emb, p_emb already L2-normalized (B, D)
     logits = (q_emb @ p_emb.t()) / temperature          # (B, B)
-    labels = torch.arange(q_emb.shape[0], device=q_emb.device)
+    B = q_emb.shape[0]
+    labels = torch.arange(B, device=q_emb.device)
+    if groups is not None:
+        # mask off-diagonal entries that share the same gold positive — they are
+        # FALSE negatives (e.g. SQuAD: many questions map to the same context).
+        same = groups[:, None] == groups[None, :]
+        same.fill_diagonal_(False)
+        logits = logits.masked_fill(same, float("-inf"))
     loss = F.cross_entropy(logits, labels)
     if symmetric:
         loss = 0.5 * (loss + F.cross_entropy(logits.t(), labels))
@@ -102,6 +115,9 @@ def main():
     ap.add_argument("--temperature", type=float, default=0.05)
     ap.add_argument("--max_len", type=int, default=128)
     ap.add_argument("--bf16", action="store_true")
+    ap.add_argument("--grad_ckpt", action="store_true",
+                    help="gradient checkpointing — trades compute for memory (bidirectional "
+                         "dense attention materializes B·H·T² scores; lets bigger batch/seq fit)")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--vocab_size", type=int, default=32768)
     args = ap.parse_args()
@@ -119,6 +135,9 @@ def main():
         model = SkylarEmbedder(cfg)
         tok = Tokenizer.from_file(args.tokenizer)
     model = model.to(dev).train()
+    if args.grad_ckpt:
+        model.gradient_checkpointing = True
+        print("gradient checkpointing: ON")
     pad_id = tok.token_to_id("<pad>")
     if pad_id is None:
         pad_id = 0
@@ -141,15 +160,16 @@ def main():
     amp = (args.bf16 and dev == "cuda")
     step = 0; t0 = time.time(); done = False
     for ep in range(args.epochs):
-        for (q_ids, q_m), (p_ids, p_m) in dl:
+        for (q_ids, q_m), (p_ids, p_m), groups in dl:
             q_ids, q_m = q_ids.to(dev), q_m.to(dev)
             p_ids, p_m = p_ids.to(dev), p_m.to(dev)
+            groups = groups.to(dev)
             for g in opt.param_groups:
                 g["lr"] = lr_at(step)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=amp):
                 q_emb = model(q_ids, attention_mask=q_m)["embeddings"]
                 p_emb = model(p_ids, attention_mask=p_m)["embeddings"]
-                loss, acc = info_nce(q_emb.float(), p_emb.float(), args.temperature)
+                loss, acc = info_nce(q_emb.float(), p_emb.float(), args.temperature, groups=groups)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
