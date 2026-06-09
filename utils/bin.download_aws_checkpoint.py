@@ -7,7 +7,7 @@ Usage:
   python download_model.py \
     --checkpoint best \
     --s3_bucket mio-bucket \
-    --s3_prefix skylar/pretrain_v1 \
+    --s3_prefix <your-prefix> \
     --s3_region eu-west-1 \
     --output ./my_model
 
@@ -15,15 +15,15 @@ Usage:
   python download_model.py \
     --checkpoint step_5000 \
     --s3_bucket mio-bucket \
-    --s3_prefix skylar/pretrain_v1 \
+    --s3_prefix <your-prefix> \
     --s3_region eu-west-1 \
     --output ./my_model
 
   # Download final checkpoint
   python download_model.py \
     --checkpoint best \
-    --s3_bucket sophia-ai-dset \
-    --s3_prefix skylar/pretrain_v1 \
+    --s3_bucket <your-bucket> \
+    --s3_prefix <your-prefix> \
     --s3_region eu-south-1
     --output ./checkpoints/Skylar-100M-Base
 
@@ -31,7 +31,7 @@ Usage:
   python download_model.py \
     --list \
     --s3_bucket mio-bucket \
-    --s3_prefix skylar/pretrain_v1 \
+    --s3_prefix <your-prefix> \
     --s3_region eu-west-1
 
 Env vars required:
@@ -83,7 +83,7 @@ def list_checkpoints(client, bucket: str, prefix: str) -> list[str]:
     names: set[str] = set()
     for page in paginator.paginate(Bucket=bucket, Prefix=ckpt_prefix, Delimiter="/"):
         for cp in page.get("CommonPrefixes", []):
-            # e.g. "skylar/pretrain_v1/checkpoints/best/"
+            # e.g. "<your-prefix>/checkpoints/best/"
             name = cp["Prefix"].rstrip("/").rsplit("/", 1)[-1]
             names.add(name)
 

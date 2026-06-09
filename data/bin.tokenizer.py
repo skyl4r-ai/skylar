@@ -37,8 +37,8 @@ Examples
 python bin_tokenizer.py \\
   --vocab_size 40960 \\
   --litetoken \\
-  --s3_bucket my-bucket \\
-  --s3_prefix skylar/tokenized_corpus \\
+  --s3_bucket <your-bucket> \\
+  --s3_prefix <your-prefix>/tokenized_corpus \\
   --s3_region eu-south-1
 
 # Reuse existing tokenizer
@@ -46,8 +46,8 @@ python bin_tokenizer.py \\
   --data data/pretrain \\
   --output data/tokenized_corpus \\
   --tokenizer data/tokenized_corpus/tokenizer.json \\
-  --s3_bucket my-bucket \\
-  --s3_prefix skylar/pretrain_v1 \\
+  --s3_bucket <your-bucket> \\
+  --s3_prefix <your-prefix> \\
   --s3_region eu-south-1
 
 # Local only (no S3)

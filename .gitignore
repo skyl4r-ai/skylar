@@ -61,3 +61,24 @@ skylar.egg-info
 /checkpoints_*/
 /.datasets/
 /CLAUDE.md
+/START.md
+/projects/
+/docs/HELPERS.md
+/training/train.runpod.sh
+
+# ══════════════════════════════════════════════════
+#  Local tooling / agent config — NEVER publish
+# ══════════════════════════════════════════════════
+/.claude/
+/.agents/
+/skills-lock.json
+/runpodctl
+
+# ══════════════════════════════════════════════════
+#  Secrets — defensive (never publish keys/creds; .env already above)
+# ══════════════════════════════════════════════════
+.env.local
+.env.*.local
+*.pem
+*.key
+secrets.*

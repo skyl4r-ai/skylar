@@ -21,8 +21,8 @@ Supports:
 Usage:
   # From S3
   python train.py \\
-    --s3_bucket my-bucket \\
-    --s3_prefix skylar/pretrain_v1 \\
+    --s3_bucket <your-bucket> \\
+    --s3_prefix <your-prefix> \\
     --s3_region eu-west-1 \\
     --preset medium --bf16
 

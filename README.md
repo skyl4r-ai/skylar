@@ -219,7 +219,7 @@ fine-tune on Italian QA; bge-m3 and e5 are evaluated zero-shot:
 ```bash
 python training/bin.pretrain.py \
   --preset medium \
-  --data_dir .datasets/pretokenized \
+  --data .datasets/pretokenized \
   --bf16 \
   --batch_size 32 \
   --grad_accum 4 \
@@ -230,7 +230,7 @@ python training/bin.pretrain.py \
 | Feature            | Detail                                                          |
 |:-------------------|:----------------------------------------------------------------|
 | 📦 **Data format** | Sharded uint32 `.bin` files (1GB each) with SHA256 checksums    |
-| ☁️ **Storage**     | Local disk or AWS S3 streaming (async, non-blocking)            |
+| ☁️ **Storage**     | Local disk or AWS S3 (shards cached locally, then loaded to RAM) |
 | 📈 **Scheduler**   | WSD (Warmup-Stable-Decay) or cosine annealing                   |
 | 💾 **Checkpoints** | HuggingFace format + async S3 upload via `ThreadPoolExecutor`   |
 | 🔄 **Resume**      | Full state recovery (model, optimizer, scaler, step, best loss) |
@@ -260,7 +260,7 @@ python training/bin.sft.py \
 ```
 skylar/
 ├── 🧠 models/                     # Model architecture
-│   ├── config.py                  #   NanoTransformerConfig + 12 presets
+│   ├── config.py                  #   NanoTransformerConfig + 15 presets
 │   ├── decoder.py                 #   NanoTransformer (GPT decoder)
 │   ├── embedder.py                #   SkylarEmbedder (bidirectional)
 │   ├── heads.py                   #   Classification + Reward heads
@@ -287,8 +287,8 @@ skylar/
 ├── 🏋️ training/                    # Training loops
 │   ├── bin.pretrain.py            #   Pre-training (Stage 1)
 │   ├── bin.sft.py                 #   SFT (Stage 2)
-│   ├── bin.dpo.py                 #   DPO (Stage 3 — planned)
-│   └── train.runpod.sh            #   Remote GPU deployment
+│   ├── bin.preference.py          #   Preference opt — ORPO/SimPO (Stage 3)
+│   └── bin.dpo.py                 #   DPO signpost → see bin.preference.py
 │
 ├── 📊 eval/                       # Evaluation & diagnostics
 │   ├── bin.eval_base_model.py     #   Base model eval
@@ -298,7 +298,7 @@ skylar/
 ├── 💬 inference/                   # Generation & chat
 │   ├── bin.chat.py                #   Interactive streaming REPL
 │   ├── bin.generate.py            #   Text generation
-│   └── bin.embed.py               #   Embedding extraction (planned)
+│   └── bin.embed.py               #   Embedding extraction (SkylarEmbedder)
 │
 ├── 🛠️ utils/                      # Utilities
 │   ├── chatML.py                  #   ChatML encoding + loss mask
@@ -477,7 +477,7 @@ python data/bin.tokenizer.py \
 | **Vocab**     | configurable (default 40,960; `medium_plus` uses 32,768) |
 | **Output**    | Sharded uint32 `.bin` files (1GB each)                |
 | **Checksums** | SHA256 per shard + JSON metadata                      |
-| **Upload**    | Auto S3 multipart transfer                            |
+| **Upload**    | Opt-in S3 multipart upload (via `--s3_bucket`)        |
 
 **Special tokens:**
 
@@ -563,20 +563,12 @@ model.push_to_hub("username/skylar-medium")
 
 <br>
 
-## ☁️ Remote Training (RunPod)
+## ☁️ Remote Training
 
-```bash
-bash training/train.runpod.sh --host <IP> --port <PORT>
-```
-
-The script handles everything:
-
-1. 🔌 SSH connection + GPU verification (`nvidia-smi`)
-2. 📤 Source code upload via `scp`
-3. 📦 Dependency installation
-4. 🔑 AWS credential export
-5. 🚀 Background training launch with `nohup`
-6. ☁️ Async checkpoint upload to S3
+Train on any remote GPU box (RunPod, Lambda, a bare server) by SSHing in and running the same
+commands as above — the pipeline has no host-specific dependencies. Manage the instance with your
+provider's CLI (e.g. `runpodctl`), and pull checkpoints back with `utils/bin.download_aws_checkpoint.py`
+(opt-in S3 via `--s3_bucket`).
 
 <br>
 

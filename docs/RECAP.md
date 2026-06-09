@@ -5,7 +5,7 @@ Un transformer from scratch, architettura identica a Qwen3-4B-Instruct: RMSNorm,
 
 ## Struttura progetto
 ```
-~/htdocs/sophia-core-server/model/skylar/
+skylar/
 ├── config.py          # NanoTransformerConfig + 11 preset (test→96b)
 ├── model.py           # NanoTransformer (architettura Qwen3-identica)
 ├── train.py           # Pre-training (text → base model)
@@ -119,7 +119,7 @@ Tutti opt-in con flag:
 Il tokenizer e i dati pre-tokenizzati sono già pronti. Comando:
 
 ```bash
-cd ~/htdocs/sophia-core-server/model/skylar
+cd skylar
 source .venv/bin/activate
 
 python train.py \

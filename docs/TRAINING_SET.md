@@ -148,7 +148,7 @@ MAX_STEPS=$((TOKENS / (BATCH * SEQ)))  # = 8316
 # warmup = 5% di max_steps
 WARMUP=$((MAX_STEPS / 20))  # = 415
 
-bash train.runpod.sh \
+python training/bin.pretrain.py \
   --preset medium \
   --bf16 --compile \
   --batch_size $BATCH \
