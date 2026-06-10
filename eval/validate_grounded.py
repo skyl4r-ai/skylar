@@ -46,6 +46,7 @@ def main():
     ap.add_argument("--max_new_tokens", type=int, default=120)
     ap.add_argument("--temperature", type=float, default=0.3)
     args = ap.parse_args()
+    torch.manual_seed(getattr(args, "seed", 0))   # R15: eval riproducibile run-to-run
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Loading {args.model} on {device} (temp={args.temperature}) ...")

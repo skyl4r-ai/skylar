@@ -59,7 +59,9 @@ def generate_text(model, tokenizer, prompt, device, max_tokens=200,
         top_k=top_k,
         top_p=top_p,
         repetition_penalty=repetition_penalty,
-        eos_token_id=tokenizer.token_to_id("<eos>"),
+        # union of the 3 stop tokens (consistent with chat.py + the eval suite): base uses <eos>, chat uses <|im_end|>
+        eos_token_id=[t for t in (tokenizer.token_to_id(n)
+                                  for n in ("<eos>", "<|im_end|>", "<|endoftext|>")) if t is not None],
     )
     return tokenizer.decode(output_ids[0].tolist())
 

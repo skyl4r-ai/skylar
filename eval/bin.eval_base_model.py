@@ -394,6 +394,7 @@ def main() -> None:
     parser.add_argument("--model", type=str, required=True, help="Path to base model checkpoint")
     parser.add_argument("--max_tokens", type=int, default=150, help="Max tokens per completion")
     args = parser.parse_args()
+    torch.manual_seed(getattr(args, "seed", 0))   # R15: eval riproducibile run-to-run
     run_eval(args)
 
 

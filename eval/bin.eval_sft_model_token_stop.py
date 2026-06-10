@@ -1,7 +1,7 @@
 import torch
 from tokenizers import Tokenizer, decoders
- NanoTransformer
-from chat_format import encode_chatml
+from models.decoder import NanoTransformer
+from utils.chatML import encode_chatml
 
 model = NanoTransformer.from_pretrained('checkpoints/skylar-100M-Chat-v4/best').to('cuda').eval()
 tok = Tokenizer.from_file('checkpoints/skylar-100M-Chat-v4/best/tokenizer.json')

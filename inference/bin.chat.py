@@ -49,7 +49,7 @@ def stream_response(model, input_ids, tokenizer, *,
     """
     # Build EOS set from tokenizer special tokens
     eos_ids: list[int] = []
-    for name in ("<|im_end|>", "<|endoftext|>",):
+    for name in ("<|im_end|>", "<|endoftext|>", "<eos>"):   # include <eos> too (consistent with generate.py + eval suite)
         tid = tokenizer.token_to_id(name)
         if tid is not None:
             eos_ids.append(tid)

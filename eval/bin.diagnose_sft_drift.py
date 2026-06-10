@@ -25,8 +25,8 @@ import torch.nn.functional as F
 from tokenizers import Tokenizer
 
 # Assumes these are in the same directory or PYTHONPATH
- NanoTransformer
-from chat_format import encode_chatml, create_loss_mask, get_chatml_ids
+from models.decoder import NanoTransformer
+from utils.chatML import encode_chatml, create_loss_mask, get_chatml_ids
 
 
 def separator(title: str) -> None:

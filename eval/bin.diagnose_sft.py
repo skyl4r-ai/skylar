@@ -106,9 +106,9 @@ def main():
     # Import from the project
     sys.path.insert(0, ".")
     try:
-        from chat_format import create_loss_mask, encode_chatml, get_chatml_ids
+        from utils.chatML import create_loss_mask, encode_chatml, get_chatml_ids
     except ImportError:
-        print("  └─ ⚠️  Impossibile importare chat_format.py, skip")
+        print("  └─ ⚠️  Impossibile importare utils.chatML, skip")
         sys.exit(1)
 
     test_messages = [
@@ -263,7 +263,7 @@ def main():
     if args.sft_model:
         print("\n┌─ TEST 7: Analisi logits modello SFT")
 
-         NanoTransformer
+        from models.decoder import NanoTransformer
 
         model = NanoTransformer.from_pretrained(args.sft_model).to("cuda").eval()
 
@@ -338,7 +338,7 @@ def main():
     if args.base_model and args.sft_model:
         print("\n┌─ TEST 8: Confronto embedding pretrain vs SFT")
 
-         NanoTransformer
+        from models.decoder import NanoTransformer
 
         base = NanoTransformer.from_pretrained(args.base_model)
         sft = NanoTransformer.from_pretrained(args.sft_model)
@@ -417,7 +417,7 @@ def main():
     if args.sft_model and len(ds) > 0:
         print("\n┌─ TEST 10: Loss breakdown su singolo esempio")
 
-         NanoTransformer
+        from models.decoder import NanoTransformer
         import torch.nn.functional as F
 
         model = NanoTransformer.from_pretrained(args.sft_model).to("cuda").eval()

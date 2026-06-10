@@ -626,8 +626,11 @@ def train_sft(args):
                 opt_table.add_row(g["name"], f"{n_p:,}", f"{g['lr']:.2e}", f"{g['weight_decay']}")
             console.print(opt_table)
     else:
-        decay_params = [p for n, p in model.named_parameters() if p.dim() >= 2]
-        nodecay_params = [p for n, p in model.named_parameters() if p.dim() < 2]
+        # exclude norm/bias (1D) AND embeddings/lm_head from weight decay (consistent with mup_param_groups)
+        decay_params, nodecay_params = [], []
+        for n, p in model.named_parameters():
+            (nodecay_params if (p.dim() < 2 or "emb" in n.lower() or "lm_head" in n.lower())
+             else decay_params).append(p)
         optimizer = torch.optim.AdamW([
             {"params": decay_params, "weight_decay": args.weight_decay},
             {"params": nodecay_params, "weight_decay": 0.0},

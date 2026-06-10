@@ -1,5 +1,10 @@
 # Skylar — Project Structure
 
+> ⚠️ **Nota:** questo documento è in parte ASPIRAZIONALE e non riflette esattamente l'albero su disco
+> (descrive es. `cli/`, `configs/`, `data/ingestion/`, `model.py`, `train.py` che potrebbero non esistere).
+> Gli entry-point reali sono i file `bin.*.py` (es. `training/bin.pretrain.py`, `inference/bin.chat.py`) e i
+> moduli importabili in `models/`. Fai riferimento al file listing reale del repo, non solo a questo doc.
+
 ```
 skylar/
 │

@@ -61,6 +61,7 @@ def main():
     ap.add_argument("--lang", choices=["it", "en", "both"], default="it",
                     help="which prompt battery to run (en = cross-lingual honesty check)")
     args = ap.parse_args()
+    torch.manual_seed(getattr(args, "seed", 0))   # R15: eval riproducibile run-to-run
 
     tests = {"it": TESTS, "en": EN_TESTS, "both": TESTS + EN_TESTS}[args.lang]
 
