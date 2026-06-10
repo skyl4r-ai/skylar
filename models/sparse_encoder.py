@@ -70,9 +70,10 @@ class SkylarSparseEncoder(PreTrainedModel):
         """
         x = self.drop(self.token_emb(input_ids))
 
-        attn_mask = None
-        if attention_mask is not None:
-            attn_mask = (1.0 - attention_mask[:, None, None, :].float()) * -1e9
+        # F1: avoid the causal fallback path (attention.py PATH 3) when no mask is given.
+        if attention_mask is None:
+            attention_mask = torch.ones(input_ids.shape, dtype=torch.long, device=input_ids.device)
+        attn_mask = (1.0 - attention_mask[:, None, None, :].float()) * -1e9
 
         for block in self.blocks:
             if self.gradient_checkpointing and self.training:
@@ -106,6 +107,9 @@ class SkylarSparseEncoder(PreTrainedModel):
         model.token_emb.load_state_dict(decoder.token_emb.state_dict())
         model.blocks.load_state_dict(decoder.blocks.state_dict())
         model.ln_f.load_state_dict(decoder.ln_f.state_dict())
+        if not getattr(decoder.config, "tie_weights", True):   # F5
+            logger.warning("from_decoder: decoder is NOT weight-tied — the SPLADE vocab projection "
+                           "reuses token_emb, not the trained lm_head; copy lm_head for a faithful init.")
         logger.info("Initialized SkylarSparseEncoder (%.1fM) from decoder",
                     model.count_params() / 1e6)
         return model

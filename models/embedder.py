@@ -124,7 +124,7 @@ class SkylarEmbedder(PreTrainedModel):
 
         if self.pool_strategy == "last":
             # Index of last non-padded token per sequence
-            seq_lengths = mask.sum(dim=1) - 1                    # (B,)
+            seq_lengths = (mask.sum(dim=1) - 1).clamp(min=0)     # (B,) — F7: all-pad -> 0, not -1 wrap
             batch_idx = torch.arange(hidden.shape[0], device=hidden.device)
             return hidden[batch_idx, seq_lengths]
 
@@ -155,9 +155,11 @@ class SkylarEmbedder(PreTrainedModel):
 
         # ── Build padding mask for attention (not causal!) ────
         # (B, T) → (B, 1, 1, T) additive mask: 0 for real, -inf for pad
-        attn_mask = None
-        if attention_mask is not None:
-            attn_mask = (1.0 - attention_mask[:, None, None, :].float()) * -1e9
+        # F1: never leave attn_mask None or the block falls into the CAUSAL path (attention.py PATH 3).
+        # If no mask is given, treat all tokens as real -> fully bidirectional (pool is unaffected).
+        if attention_mask is None:
+            attention_mask = torch.ones(input_ids.shape, dtype=torch.long, device=input_ids.device)
+        attn_mask = (1.0 - attention_mask[:, None, None, :].float()) * -1e9
 
         # ── Transformer blocks (bidirectional) ────────────────
         for block in self.blocks:

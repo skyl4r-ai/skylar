@@ -220,6 +220,13 @@ class NanoTransformer(PreTrainedModel):
             dict with 'logits', 'loss' (if labels), 'kv_cache'
         """
         B, T = input_ids.shape
+        # F3: attention_mask, if passed by a caller, MUST be the 4D additive form (B,1,T,T).
+        # A 2D HF-style padding mask (B,T) would silently disable causality and act as a bias.
+        if attention_mask is not None and attention_mask.dim() != 4:
+            raise ValueError(
+                f"NanoTransformer.forward expects a 4D additive attention_mask (B,1,T,T), got "
+                f"{attention_mask.dim()}D. Build it as (1-mask)[:,None,None,:]*min_val, or pass "
+                f"document_ids for packed training.")
         x = self.drop(self.token_emb(input_ids))
 
         if kv_cache is not None:

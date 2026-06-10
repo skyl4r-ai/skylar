@@ -11,8 +11,8 @@ Same recipe as the embedder: from_decoder() reuses the pretrained backbone, runs
 it bidirectionally (full attention, no causal mask), pools, and a small head maps
 to class logits. Trained with cross-entropy.
 
-Token-level extraction (NER / span QA) uses TokenClassificationHead in heads.py
-on the same backbone — same idea, per-token logits instead of pooled.
+Token-level extraction (NER / span QA) would use a per-token head on the same
+backbone (not yet implemented) — same idea, per-token logits instead of pooled.
 """
 import logging
 
@@ -63,16 +63,17 @@ class SkylarClassifier(PreTrainedModel):
         if self.pool_strategy == "cls":
             return hidden[:, 0]
         if self.pool_strategy == "last":
-            idx = mask.sum(1) - 1
+            idx = (mask.sum(1) - 1).clamp(min=0)             # F7: all-pad -> 0, not -1 wrap
             return hidden[torch.arange(hidden.shape[0], device=hidden.device), idx]
         me = mask.unsqueeze(-1).float()
         return (hidden * me).sum(1) / me.sum(1).clamp(min=1)
 
     def forward(self, input_ids, attention_mask=None, labels=None):
         x = self.drop(self.token_emb(input_ids))
-        attn_mask = None
-        if attention_mask is not None:
-            attn_mask = (1.0 - attention_mask[:, None, None, :].float()) * -1e9
+        # F1: avoid the causal fallback path (attention.py PATH 3) when no mask is given.
+        if attention_mask is None:
+            attention_mask = torch.ones(input_ids.shape, dtype=torch.long, device=input_ids.device)
+        attn_mask = (1.0 - attention_mask[:, None, None, :].float()) * -1e9
         for block in self.blocks:
             if self.gradient_checkpointing and self.training:
                 x, _ = torch.utils.checkpoint.checkpoint(

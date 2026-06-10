@@ -45,8 +45,8 @@ class ClassificationHead(nn.Module):
         """
         if self.pool_mode == "last":
             if attention_mask is not None:
-                seq_lengths = attention_mask.sum(dim=1).long() - 1
-                pooled = hidden_states[torch.arange(hidden_states.size(0)), seq_lengths]
+                seq_lengths = (attention_mask.sum(dim=1).long() - 1).clamp(min=0)   # F7
+                pooled = hidden_states[torch.arange(hidden_states.size(0), device=hidden_states.device), seq_lengths]  # F2: device=
             else:
                 pooled = hidden_states[:, -1, :]
         elif self.pool_mode == "mean":
@@ -84,8 +84,8 @@ class RewardHead(nn.Module):
             (B,) scalar rewards
         """
         if attention_mask is not None:
-            seq_lengths = attention_mask.sum(dim=1).long() - 1
-            pooled = hidden_states[torch.arange(hidden_states.size(0)), seq_lengths]
+            seq_lengths = (attention_mask.sum(dim=1).long() - 1).clamp(min=0)   # F7
+            pooled = hidden_states[torch.arange(hidden_states.size(0), device=hidden_states.device), seq_lengths]  # F2: device=
         else:
             pooled = hidden_states[:, -1, :]
 
