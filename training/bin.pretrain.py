@@ -348,9 +348,15 @@ def load_pretokenized_data(
             total_tokens += len(arr)
             progress.update(task, advance=1, description=f"Loading shards ({total_tokens:,} tokens)")
 
-    tokens = torch.from_numpy(np.concatenate(all_arrays)).long()
+    # Keep the corpus COMPACT in RAM (uint16/uint32 straight from disk) — do NOT cast to
+    # int64 here. At ~19B tokens int64 would be ~150GB, and the old per-token int64
+    # doc_ids tensor another ~150GB (~300GB → OOM on a normal box). We convert each chunk
+    # to long per-batch in __getitem__ and compute document_ids on the fly, so RAM ≈
+    # on-disk size (uint16 ≈ 2 bytes/token, ~38GB for 19B).
+    tokens = np.concatenate(all_arrays)  # numpy, dtype from meta (uint16 for vocab<65536)
     console.print(
-        f"  [green]✓[/green] Loaded [bold]{total_tokens:,}[/bold] tokens ([cyan]{tokens.nbytes / 1e9:.2f} GB[/cyan])")
+        f"  [green]✓[/green] Loaded [bold]{total_tokens:,}[/bold] tokens "
+        f"([cyan]{tokens.nbytes / 1e9:.2f} GB[/cyan] in RAM as {tokens.dtype})")
 
     # Sanity check
     expected = meta.get("total_tokens", 0)
@@ -390,7 +396,10 @@ class TextDataset(Dataset):
         x = self.tokens[start: start + self.seq_len]
         y = self.tokens[start + 1: start + self.seq_len + 1]
         min_len = min(len(x), len(y))
-        return x[:min_len], y[:min_len]
+        # numpy(uint16) -> torch.long per batch (casting the whole corpus to int64 would OOM)
+        x = torch.from_numpy(np.asarray(x[:min_len], dtype=np.int64))
+        y = torch.from_numpy(np.asarray(y[:min_len], dtype=np.int64))
+        return x, y
 
 
 class PackedDataset(Dataset):
@@ -404,38 +413,30 @@ class PackedDataset(Dataset):
     for FlexAttention document masking (prevents cross-doc attention leakage).
     """
 
-    def __init__(self, tokens, seq_len, doc_boundaries=None):
+    def __init__(self, tokens, seq_len, bos_id=None):
         n_chunks = len(tokens) // (seq_len + 1)
         if n_chunks == 0:
             n_chunks = 1
-            tokens = torch.cat([tokens, torch.zeros(seq_len + 1 - len(tokens), dtype=tokens.dtype)])
+            pad = np.zeros(seq_len + 1 - len(tokens), dtype=tokens.dtype)
+            tokens = np.concatenate([tokens, pad])
         self.total_tokens = n_chunks * (seq_len + 1)
+        # numpy view (no copy) — stays uint16 in RAM; cast to long happens per-batch
         self.chunks = tokens[:self.total_tokens].reshape(n_chunks, seq_len + 1)
-
-        # Build document_ids if boundaries are provided
-        self.doc_ids = None
-        if doc_boundaries is not None and len(doc_boundaries) > 0:
-            doc_id_flat = self._build_doc_ids(doc_boundaries, len(tokens))
-            self.doc_ids = doc_id_flat[:self.total_tokens].reshape(n_chunks, seq_len + 1)
-
-    @staticmethod
-    def _build_doc_ids(boundaries, total_len):
-        """Convert document boundary positions to a flat doc_id tensor."""
-        doc_ids = torch.zeros(total_len, dtype=torch.long)
-        for doc_idx in range(len(boundaries)):
-            start = boundaries[doc_idx]
-            end = boundaries[doc_idx + 1] if doc_idx + 1 < len(boundaries) else total_len
-            doc_ids[start:end] = doc_idx
-        return doc_ids
+        self.bos_id = bos_id           # set -> document_ids computed on the fly per chunk
 
     def __len__(self):
         return len(self.chunks)
 
     def __getitem__(self, idx):
         chunk = self.chunks[idx]
-        x, y = chunk[:-1], chunk[1:]
-        if self.doc_ids is not None:
-            return x, y, self.doc_ids[idx][:-1]
+        x = torch.from_numpy(np.asarray(chunk[:-1], dtype=np.int64))
+        y = torch.from_numpy(np.asarray(chunk[1:], dtype=np.int64))
+        if self.bos_id is not None:
+            # document_ids on the fly: a new id at each <bos> in the window. The mask
+            # only checks EQUALITY (same doc), so per-chunk RELATIVE ids are exact — and
+            # cost ~0 RAM vs a full int64 doc_ids tensor the size of the whole corpus.
+            doc_ids = torch.from_numpy(np.cumsum(chunk[:-1] == self.bos_id, dtype=np.int64))
+            return x, y, doc_ids
         return x, y
 
 
@@ -443,11 +444,12 @@ class PackedDataset(Dataset):
 # DATA PIPELINE
 # ─────────────────────────────────────────────────────────────
 
-def _find_doc_boundaries(tokens, bos_id):
-    """Find document boundary positions (BOS token locations)."""
+def _count_bos(tokens, bos_id):
+    """Count document starts (BOS occurrences) — for the log only; the actual
+    per-token document_ids are computed per-chunk in PackedDataset (no giant tensor)."""
     if bos_id is None:
-        return []
-    return (tokens == bos_id).nonzero(as_tuple=True)[0].tolist()
+        return 0
+    return int(np.count_nonzero(tokens == bos_id))
 
 
 def build_datasets(
@@ -462,32 +464,30 @@ def build_datasets(
     train_tokens = tokens[:split]
     val_tokens = tokens[split:]
 
-    # Document boundaries for packing mask
-    train_boundaries = None
-    val_boundaries = None
-
+    # Document masking: doc_ids are computed PER-CHUNK inside PackedDataset from the
+    # <bos> positions in each window (no full-corpus doc_ids tensor). Here we only need
+    # bos_id + a cheap count for the log.
+    doc_mask_on = False
+    bos_id = None
     if packing:
         bos_id = tokenizer.token_to_id("<bos>")
-        all_boundaries = _find_doc_boundaries(tokens, bos_id)
-        if all_boundaries:
-            train_boundaries = [b for b in all_boundaries if b < split]
-            val_boundaries = [b - split for b in all_boundaries if b >= split]
-            if val_boundaries and val_boundaries[0] != 0:
-                val_boundaries = [0] + val_boundaries
-            console.print(
-                f"  [green]✓[/green] Found [bold]{len(train_boundaries)}[/bold] train / [bold]{len(val_boundaries)}[/bold] val document boundaries")
+        n_bos = _count_bos(tokens, bos_id)
+        if n_bos > 0:
+            doc_mask_on = True
+            console.print(f"  [green]✓[/green] [bold]{n_bos:,}[/bold] documents (BOS) — document masking ON")
         else:
+            bos_id = None
             console.print("  [yellow]⚠[/yellow] No BOS tokens found — packing without document masking")
 
     if packing:
-        train_ds = PackedDataset(train_tokens, seq_len, doc_boundaries=train_boundaries)
-        val_ds = PackedDataset(val_tokens, seq_len, doc_boundaries=val_boundaries)
+        train_ds = PackedDataset(train_tokens, seq_len, bos_id=bos_id)
+        val_ds = PackedDataset(val_tokens, seq_len, bos_id=bos_id)
     else:
         train_ds = TextDataset(train_tokens, seq_len)
         val_ds = TextDataset(val_tokens, seq_len)
 
     mode = "packed" if packing else "strided"
-    has_mask = " + doc masking" if packing and train_boundaries else ""
+    has_mask = " + doc masking" if packing and doc_mask_on else ""
 
     data_table = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
     data_table.add_column(style="bold")
