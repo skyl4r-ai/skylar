@@ -27,6 +27,31 @@ CTO [Sophia AI](https://2sophia.ai)**
 
 </div>
 
+<div align="center">
+
+### ⌨️ Skylar writes COBOL — it compiles, runs, and returns the right answer. 100% local, 100% from scratch.
+
+<img src="docs/skylar-cobol-demo.gif" alt="A from-scratch Skylar model generates COBOL; GnuCOBOL compiles and runs it" width="760"/>
+
+<sub>A from-scratch Skylar model completes a COBOL task → **GnuCOBOL compiles it** → it **runs** → correct output. No internet, no API, no third-party weights.</sub>
+
+</div>
+
+> The COBOL specialist shown above is on its way. **Today**, a single `pip install` already gives you Skylar's
+> live chat & retrieval models — small, sovereign, and runnable on a single GPU or CPU:
+
+```bash
+pip install skylar
+
+# chat with a from-scratch Skylar model (Italian-legal, 236M)
+skylar chat  --model Sophia-AI/Skylar-236M-Chat
+
+# semantic retrieval with the Skylar embedder
+skylar embed --model Sophia-AI/Skylar-236M-Embed --query "prestito casa" --docs "mutuo" "meteo"
+```
+
+<br>
+
 > **Skylar** is a research-grade, production-ready decoder-only Transformer framework that implements the exact same
 > architectural blueprint used by **LLaMA 3**, **Mistral**, and **Qwen3** — written entirely from scratch in PyTorch
 > with
