@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "skylar"
+version = "0.2.3"
+description = "Skylar — local, sovereign, from-scratch LLMs. CLI + loader for the Skylar model family: generative chat, embeddings, and a COBOL specialist."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "A. Ivanovitch" }]
+keywords = ["llm", "cobol", "code-generation", "sovereign-ai", "from-scratch"]
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.1",
+    "transformers>=4.40",
+    "tokenizers>=0.15",
+    "huggingface_hub>=0.20",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+serve = ["fastapi>=0.100", "uvicorn>=0.23", "pydantic>=2.0"]
+
+[project.urls]
+"Models" = "https://huggingface.co/Sophia-AI"
+
+[project.scripts]
+skylar = "skylar.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["skylar*"]

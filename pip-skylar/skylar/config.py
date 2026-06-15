@@ -209,18 +209,6 @@ PRESETS = {
         max_seq_len=32768, rope_theta=5000000.0,
     ),
 
-    # ─── 1B_D — preset "D", la code-SLM COBOL seria (from-scratch) ───
-    # ~980M params (vocab 48000) / ~956M (vocab 32768) | ctx 16K.
-    # Scelte (vs il "1B" sopra): d_head=128 ESPLICITO (Qwen3-style, come gold/4b/8b),
-    # n_heads=12 (1536/128), GQA 3:1 (n_kv=4), d_ff=4096 (SwiGLU ff/dm=2.67 come gold),
-    # 36 layer → aspect 42.7 = DEEP, headroom di reasoning (il gap che il gold non chiuse).
-    # tie_weights=True (preset <8b). Chinchilla 20×: ~19.13B token | shard uint16 ≈ ~38 GB.
-    # RTX 4090: ❌ OOM in training → RunPod (5090 / PRO 6000 / H100 ~$420/~7g).
-    "1B_D": dict(
-        d_model=1536, n_heads=12, n_kv_heads=4, d_head=128, n_layers=36, d_ff=4096,
-        max_seq_len=16384, rope_theta=1000000.0,
-    ),
-
     # ─── 4B — Qwen3-4B ─────────────────────────────────────
     # Architettura IDENTICA a Qwen3-4B (config.json verificato su HuggingFace).
     # 4.0B params con vocab Qwen3 (151936) | ~3.6B con nostro vocab (40960)

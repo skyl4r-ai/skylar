@@ -321,7 +321,8 @@ def load_pretokenized_data(
     tokenizer = Tokenizer.from_file(str(tok_path))
     console.print(f"  [green]✓[/green] Tokenizer loaded: vocab_size=[bold]{tokenizer.get_vocab_size()}[/bold]")
 
-    # Load shards → single uint32 LE tensor
+    # Load shards → single LE tensor; dtype dal meta (uint16 per vocab 48k, altrimenti uint32)
+    _dtype = "<u2" if str(meta.get("dtype", "uint32")).lower() == "uint16" else "<u4"
     all_arrays = []
     total_tokens = 0
 
@@ -342,7 +343,7 @@ def load_pretokenized_data(
                 console.print(f"  [bold red]✗[/bold red] Shard missing: {shard_path}")
                 sys.exit(1)
 
-            arr = np.fromfile(str(shard_path), dtype="<u4")  # little-endian uint32
+            arr = np.fromfile(str(shard_path), dtype=_dtype)  # dtype dal meta (uint16/uint32)
             all_arrays.append(arr)
             total_tokens += len(arr)
             progress.update(task, advance=1, description=f"Loading shards ({total_tokens:,} tokens)")

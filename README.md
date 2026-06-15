@@ -35,18 +35,23 @@ CTO [Sophia AI](https://2sophia.ai)**
 
 <sub>A from-scratch Skylar model completes a COBOL task → **GnuCOBOL compiles it** → it **runs** → correct output. No internet, no API, no third-party weights.</sub>
 
+<img src="docs/coboleval_benchmark.png" alt="COBOLEval — Skylar-390M-Cobol beats 7B code models on the same harness" width="780"/>
+
 </div>
 
-> The COBOL specialist shown above is on its way. **Today**, a single `pip install` already gives you Skylar's
-> live chat & retrieval models — small, sovereign, and runnable on a single GPU or CPU:
+> **The COBOL specialist is live.** `pip install skylar` → `skylar cobol`. On **COBOLEval** (GnuCOBOL
+> compile + execute, same harness) it **beats Qwen2.5-Coder-7B, CodeLlama-7B and StarCoder2-7B** — at
+> **18× fewer parameters**. Model + full numbers: **[Sophia-AI/Skylar-390M-Cobol](https://huggingface.co/Sophia-AI/Skylar-390M-Cobol)**
+> *(research preview — a stub completer, not a chatbot; read the card).*
 
 ```bash
 pip install skylar
 
-# chat with a from-scratch Skylar model (Italian-legal, 236M)
-skylar chat  --model Sophia-AI/Skylar-236M-Chat
+# the COBOL specialist (Skylar-390M-Cobol) — completes a COBOL stub into a compilable program
+skylar cobol --example
 
-# semantic retrieval with the Skylar embedder
+# chat & semantic retrieval (Italian-legal, 236M)
+skylar chat  --model Sophia-AI/Skylar-236M-Chat
 skylar embed --model Sophia-AI/Skylar-236M-Embed --query "prestito casa" --docs "mutuo" "meteo"
 ```
 
