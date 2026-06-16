@@ -321,42 +321,66 @@ def load_pretokenized_data(
     tokenizer = Tokenizer.from_file(str(tok_path))
     console.print(f"  [green]✓[/green] Tokenizer loaded: vocab_size=[bold]{tokenizer.get_vocab_size()}[/bold]")
 
-    # Load shards → single LE tensor; dtype dal meta (uint16 per vocab 48k, altrimenti uint32)
+    # Shards → ONE on-disk memmap (concatenated), then mmap read-only. We do NOT load the
+    # whole corpus into RAM: np.concatenate would spike to ~2× corpus (all shards + result,
+    # ~80GB at 19B tok) and, under multi-GPU (accelerate launch = N processes), every rank
+    # would duplicate it (N×, e.g. 4×41GB=164GB + concat spikes → OOM). Instead we pack the
+    # shards shard-by-shard into a single .u16 file (peak RAM ≈ one shard) and memmap it:
+    # the OS page-cache is SHARED across ranks, so physical RAM ≈ corpus size ONCE, not N×.
+    # __getitem__ still casts each chunk to long per-batch and computes doc_ids on the fly.
+    import fcntl
     _dtype = "<u2" if str(meta.get("dtype", "uint32")).lower() == "uint16" else "<u4"
-    all_arrays = []
+    itemsize = np.dtype(_dtype).itemsize
+
+    # total tokens from file sizes — no RAM load
     total_tokens = 0
+    for rec in shard_records:
+        shard_path = shards_dir / rec["filename"]
+        if not shard_path.exists():
+            console.print(f"  [bold red]✗[/bold red] Shard missing: {shard_path}")
+            sys.exit(1)
+        total_tokens += shard_path.stat().st_size // itemsize
 
-    with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(bar_width=30),
-            MofNCompleteColumn(),
-            TimeElapsedColumn(),
-            console=console,
-            transient=True,
-    ) as progress:
-        task = progress.add_task(f"Loading {len(shard_records)} shards", total=len(shard_records))
-        for rec in shard_records:
-            filename = rec["filename"]
-            shard_path = shards_dir / filename
-            if not shard_path.exists():
-                console.print(f"  [bold red]✗[/bold red] Shard missing: {shard_path}")
-                sys.exit(1)
+    mmap_path = shards_dir.parent / "_packed_corpus.u16"
+    lock_path = shards_dir.parent / "_packed_corpus.lock"
+    expected_bytes = total_tokens * itemsize
 
-            arr = np.fromfile(str(shard_path), dtype=_dtype)  # dtype dal meta (uint16/uint32)
-            all_arrays.append(arr)
-            total_tokens += len(arr)
-            progress.update(task, advance=1, description=f"Loading shards ({total_tokens:,} tokens)")
+    # Build the concatenated memmap once. Race-safe across ranks via an exclusive file lock,
+    # and crash-safe via write-to-tmp + atomic rename (a half-written file never looks valid).
+    with open(lock_path, "w") as _lf:
+        fcntl.flock(_lf, fcntl.LOCK_EX)
+        try:
+            if not (mmap_path.exists() and mmap_path.stat().st_size == expected_bytes):
+                tmp_path = mmap_path.with_suffix(".u16.tmp")
+                out = np.memmap(str(tmp_path), dtype=_dtype, mode="w+", shape=(total_tokens,))
+                off = 0
+                with Progress(
+                        SpinnerColumn(),
+                        TextColumn("[progress.description]{task.description}"),
+                        BarColumn(bar_width=30),
+                        MofNCompleteColumn(),
+                        TimeElapsedColumn(),
+                        console=console,
+                        transient=True,
+                ) as progress:
+                    task = progress.add_task(f"Packing {len(shard_records)} shards → memmap", total=len(shard_records))
+                    for rec in shard_records:
+                        arr = np.fromfile(str(shards_dir / rec["filename"]), dtype=_dtype)
+                        out[off: off + len(arr)] = arr
+                        off += len(arr)
+                        progress.update(task, advance=1, description=f"Packing shards ({off:,} tokens)")
+                out.flush()
+                del out
+                tmp_path.replace(mmap_path)  # atomic: final file appears only when complete
+        finally:
+            fcntl.flock(_lf, fcntl.LOCK_UN)
 
-    # Keep the corpus COMPACT in RAM (uint16/uint32 straight from disk) — do NOT cast to
-    # int64 here. At ~19B tokens int64 would be ~150GB, and the old per-token int64
-    # doc_ids tensor another ~150GB (~300GB → OOM on a normal box). We convert each chunk
-    # to long per-batch in __getitem__ and compute document_ids on the fly, so RAM ≈
-    # on-disk size (uint16 ≈ 2 bytes/token, ~38GB for 19B).
-    tokens = np.concatenate(all_arrays)  # numpy, dtype from meta (uint16 for vocab<65536)
+    # Read-only memmap: shared page-cache across ranks, RAM ≈ corpus once. Per-batch long
+    # cast + on-the-fly doc_ids keep the working set tiny (see TextDataset/PackedDataset).
+    tokens = np.memmap(str(mmap_path), dtype=_dtype, mode="r")
     console.print(
-        f"  [green]✓[/green] Loaded [bold]{total_tokens:,}[/bold] tokens "
-        f"([cyan]{tokens.nbytes / 1e9:.2f} GB[/cyan] in RAM as {tokens.dtype})")
+        f"  [green]✓[/green] Corpus [bold]{total_tokens:,}[/bold] tokens memmapped "
+        f"([cyan]{tokens.nbytes / 1e9:.2f} GB[/cyan] on disk, shared page-cache, dtype {tokens.dtype})")
 
     # Sanity check
     expected = meta.get("total_tokens", 0)
