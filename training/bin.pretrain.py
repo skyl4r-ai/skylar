@@ -1,1203 +1,492 @@
 """
-Training script — loads pre-tokenized shards from S3 or local disk.
+From-scratch decoder-only pretrain — the framework's real long-run trainer.
 
-Requires output from pre_tokenize.py:
-  tokenizer.json
-  pretokenized_meta.json
-  shards/shard_000000.bin ...
+Memmap uint16/uint32 streaming loader (O(1) RAM) + HuggingFace Accelerate (DDP) multi-GPU +
+torch.compile, with full telemetry to metrics.jsonl, milestone snapshots, and crash-safe resume
+(model + optimizer + RNG + data-sampler/prefetch state). Cosine or WSD LR schedule. Optional
+document-masked attention and optional async S3 checkpoint upload.
 
-Supports:
-  - Load shards from AWS S3 or local directory
-  - Cosine or WSD (Warmup-Stable-Decay) LR schedule
-  - µP for HP transfer across model widths
-  - Mixed precision (bf16/fp16)
-  - Gradient accumulation
-  - Wandb logging (optional)
-  - HuggingFace checkpointing (save_pretrained)
-  - Resume from checkpoint
-  - FlexAttention document masking (automatic when packing)
-  - Async S3 checkpoint upload (best-effort, non-blocking)
+  single-GPU:  python training/bin.pretrain.py --preset medium --data data/tokenized ...
+  multi-GPU :  accelerate launch --num_processes 4 --mixed_precision no \
+                 training/bin.pretrain.py --preset 1b --data data/tokenized --seq_len 8192 \
+                 --batch_size 4 --grad_accum 8 --epochs 1 --out checkpoints/run
+               # per-rank seed + tok/step x num_processes -> 1 epoch = corpus, split across ranks
 
-Usage:
-  # From S3
-  python train.py \\
-    --s3_bucket <your-bucket> \\
-    --s3_prefix <your-prefix> \\
-    --s3_region eu-west-1 \\
-    --preset medium --bf16
+LAUNCH WITH `--mixed_precision no`: bf16 is done via a MANUAL autocast around the forward.
+accelerate's bf16 path wraps the output in convert_to_fp32 -> .float() on the FULL logits tensor
+(GBs at long seq -> wasteful + OOM). Only the scalar loss matters; logits stay bf16.
 
-  # From local pre_tokenize.py output
-  python train.py --data data/tokenized_corpus --preset medium --bf16
-
-  # Resume from checkpoint
-  python train.py --data data/tokenized_corpus --resume checkpoints/step_5000
-
-  # WSD schedule
-  python train.py --data data/tokenized_corpus --lr_schedule wsd --lr_decay_ratio 0.1
-
-  # µP: tune on proxy, transfer to target
-  python train.py --data data/tokenized_corpus --preset xl --mup_base_d_model 256 --bf16
-
-Env for S3:
-  AWS_ACCESS_KEY_ID
-  AWS_SECRET_ACCESS_KEY
+History: this unifies the old framework trainer with an optimized long-run trainer. Kept from
+the old bin.pretrain.py: WSD schedule, S3 checkpoint upload, document masking, dtype-flex (now in
+data/memmap_dataset.py). NOT ported (recover from git history if needed): auto-batch (--batch_size 0),
+µP param-group rich table, sample-during-train (--sample_every), fp16/GradScaler (obsolete — bf16
+wins), and S3 DATA download (now a pre-step: fetch shards to disk first; the loader reads local).
 """
-
-import os
-import sys
-import json
-import math
-import time
-import random
-import shutil
-import logging
-import argparse
-from pathlib import Path
+import argparse, json, math, os, shutil, subprocess, sys, time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional
+from pathlib import Path
+
+# make the repo root importable when run as a script without `pip install -e .`
+# (relative to THIS file — generic, no machine-specific path)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader
+from accelerate import Accelerator
+from accelerate.utils import set_seed
 from tokenizers import Tokenizer
 
-from models.config import get_config, PRESETS
-from models.decoder import NanoTransformer, HAS_FLEX_ATTENTION
+from models.config import get_config
+from models.decoder import NanoTransformer
+from data.memmap_dataset import MemmapTokenDataset, Prefetcher
 
-from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
-from rich.progress import (
-    Progress, SpinnerColumn, BarColumn, TextColumn,
-    TimeElapsedColumn, MofNCompleteColumn, TimeRemainingColumn,
-)
-from rich.text import Text
-from rich import box
-
-logger = logging.getLogger(__name__)
-console = Console()
-
-# ─────────────────────────────────────────────────────────────
-# S3 CLIENT
-# ─────────────────────────────────────────────────────────────
-
-S3_MAX_RETRIES: int = 5
-S3_RETRY_BASE_SEC: float = 2.0
+ROOT = Path(__file__).resolve().parent.parent
 
 
-class S3Client:
-    """Download/upload files from/to AWS S3 with retry logic.
-
-    Env vars required:
-        AWS_ACCESS_KEY_ID
-        AWS_SECRET_ACCESS_KEY
-    """
-
-    def __init__(self, bucket: str, prefix: str, region: str) -> None:
-        try:
-            import boto3
-            from botocore.config import Config
-        except ImportError as exc:
-            raise ImportError("boto3 required: pip install boto3") from exc
-
-        access_key = os.environ.get("AWS_ACCESS_KEY_ID")
-        secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
-        if not access_key or not secret_key:
-            raise EnvironmentError(
-                "Missing AWS_ACCESS_KEY_ID and/or AWS_SECRET_ACCESS_KEY"
-            )
-
-        self.bucket = bucket
-        self.prefix = prefix.strip("/") if prefix else ""
-        self.region = region
-
-        boto_config = Config(
-            retries={"max_attempts": 0, "mode": "standard"},
-            max_pool_connections=10,
-        )
-        self._client = boto3.client(
-            "s3",
-            region_name=region,
-            aws_access_key_id=access_key,
-            aws_secret_access_key=secret_key,
-            config=boto_config,
-        )
-        console.print(f"  [green]✓[/green] S3 client ready: [cyan]s3://{bucket}/{self.prefix}[/cyan] (region={region})")
-
-    def _full_key(self, name: str) -> str:
-        if not self.prefix:
-            return name
-        return f"{self.prefix}/{name}"
-
-    def download(self, remote_name: str, local_path: Path) -> Path:
-        """Download a file from S3 with retries."""
-        key = self._full_key(remote_name)
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-
-        for attempt in range(1, S3_MAX_RETRIES + 1):
-            try:
-                self._client.download_file(self.bucket, key, str(local_path))
-                return local_path
-            except Exception:
-                if attempt == S3_MAX_RETRIES:
-                    console.print(f"  [bold red]✗[/bold red] S3 download FAILED after {S3_MAX_RETRIES} attempts: {key}")
-                    raise
-                wait = S3_RETRY_BASE_SEC * (2 ** (attempt - 1))
-                console.print(
-                    f"  [yellow]⚠[/yellow] S3 download attempt {attempt}/{S3_MAX_RETRIES} failed: {remote_name}, retry in {wait:.0f}s")
-                time.sleep(wait)
-        raise RuntimeError("unreachable")
-
-    def upload(self, local_path: Path, remote_name: str) -> str:
-        """Upload a file to S3 with retries. Returns s3:// URI."""
-        from boto3.s3.transfer import TransferConfig
-
-        key = self._full_key(remote_name)
-        uri = f"s3://{self.bucket}/{key}"
-
-        transfer_cfg = TransferConfig(
-            multipart_threshold=100 * 1024 * 1024,
-            multipart_chunksize=64 * 1024 * 1024,
-            max_concurrency=4,
-            use_threads=True,
-        )
-
-        for attempt in range(1, S3_MAX_RETRIES + 1):
-            try:
-                self._client.upload_file(
-                    str(local_path), self.bucket, key, Config=transfer_cfg
-                )
-                return uri
-            except Exception:
-                if attempt == S3_MAX_RETRIES:
-                    console.print(
-                        f"  [bold red]✗[/bold red] S3 upload FAILED after {S3_MAX_RETRIES} attempts: {local_path}")
-                    raise
-                wait = S3_RETRY_BASE_SEC * (2 ** (attempt - 1))
-                console.print(
-                    f"  [yellow]⚠[/yellow] S3 upload attempt {attempt}/{S3_MAX_RETRIES} failed: {local_path.name}, retry in {wait:.0f}s")
-                time.sleep(wait)
-        raise RuntimeError("unreachable")
-
-    def upload_directory(self, local_dir: Path, remote_prefix: str) -> list[str]:
-        """Upload all files in a directory (non-recursive). Returns list of URIs."""
-        uris = []
-        for f in sorted(local_dir.iterdir()):
-            if f.is_file():
-                remote_name = f"{remote_prefix}/{f.name}"
-                uri = self.upload(f, remote_name)
-                uris.append(uri)
-        return uris
+# ── LR schedules ──
+def lr_cosine(step, warmup, total, base, min_ratio):
+    if step < warmup:
+        return base * (step + 1) / max(1, warmup)
+    t = min(1.0, (step - warmup) / max(1, total - warmup))
+    return base * (min_ratio + (1 - min_ratio) * 0.5 * (1 + math.cos(math.pi * t)))
 
 
-# ─────────────────────────────────────────────────────────────
-# ASYNC S3 CHECKPOINT UPLOAD
-# ─────────────────────────────────────────────────────────────
+def lr_wsd(step, warmup, total, base, min_ratio, decay_ratio=0.1):
+    """Warmup-Stable-Decay (DeepSeek-V3/OLMo-2/MiniCPM): warmup -> constant -> linear decay.
+    Resumable mid-stable without knowing total in advance; flatter minima -> better SFT."""
+    min_lr = base * min_ratio
+    if step < warmup:
+        return base * (step + 1) / max(1, warmup)
+    if step >= total:
+        return min_lr
+    decay_steps = max(1, int(total * decay_ratio))
+    stable_end = total - decay_steps
+    if step < stable_end:
+        return base
+    return min_lr + (base - min_lr) * (1.0 - (step - stable_end) / decay_steps)
 
-_upload_pool: Optional[ThreadPoolExecutor] = None
+
+def lr_at(step, warmup, total, base, min_ratio=0.1, schedule="cosine", decay_ratio=0.1):
+    if schedule == "wsd":
+        return lr_wsd(step, warmup, total, base, min_ratio, decay_ratio)
+    return lr_cosine(step, warmup, total, base, min_ratio)
 
 
-def _get_upload_pool() -> ThreadPoolExecutor:
+# ── optional async S3 checkpoint upload ──
+_upload_pool = None
+
+
+def _get_pool():
     global _upload_pool
     if _upload_pool is None:
         _upload_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="s3-upload")
     return _upload_pool
 
 
-def async_upload_checkpoint(
-        s3_client: S3Client,
-        local_dir: str,
-        remote_prefix: str,
-) -> None:
-    """Fire-and-forget S3 upload of a checkpoint directory.
+class S3Client:
+    """Minimal S3 upload with retries. Needs AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY."""
+    def __init__(self, bucket, prefix, region):
+        import boto3
+        from botocore.config import Config
+        if not (os.environ.get("AWS_ACCESS_KEY_ID") and os.environ.get("AWS_SECRET_ACCESS_KEY")):
+            raise EnvironmentError("Missing AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY")
+        self.bucket, self.prefix, self.region = bucket, (prefix or "").strip("/"), region
+        self._c = boto3.client("s3", region_name=region, config=Config(max_pool_connections=10))
 
-    Copies the checkpoint dir first so training can continue even if upload is slow.
-    Best-effort: logs success or failure, never crashes training.
-    """
+    def _key(self, name):
+        return f"{self.prefix}/{name}" if self.prefix else name
+
+    def upload(self, local_path, remote_name, retries=5):
+        from boto3.s3.transfer import TransferConfig
+        cfg = TransferConfig(multipart_threshold=100 << 20, multipart_chunksize=64 << 20,
+                             max_concurrency=4, use_threads=True)
+        for a in range(1, retries + 1):
+            try:
+                self._c.upload_file(str(local_path), self.bucket, self._key(remote_name), Config=cfg)
+                return
+            except Exception:
+                if a == retries:
+                    raise
+                time.sleep(2.0 * (2 ** (a - 1)))
+
+    def upload_directory(self, local_dir, remote_prefix):
+        for f in sorted(Path(local_dir).iterdir()):
+            if f.is_file():
+                self.upload(f, f"{remote_prefix}/{f.name}")
+
+
+def async_upload_checkpoint(s3, local_dir, remote_prefix):
+    """Fire-and-forget: stage a copy, upload in a background thread, never crash training."""
     src = Path(local_dir)
     staging = src.parent / f".upload_staging_{src.name}"
-
     try:
         if staging.exists():
             shutil.rmtree(staging)
         shutil.copytree(src, staging)
     except Exception as e:
-        console.print(f"  [yellow]⚠[/yellow] S3 upload staging failed for {src.name}: {e}")
+        print(f"[s3] staging failed for {src.name}: {e}", flush=True)
         return
 
-    def _do_upload():
+    def _do():
         try:
-            uris = s3_client.upload_directory(staging, remote_prefix)
-            console.print(f"  [cyan]☁[/cyan] S3 checkpoint uploaded: [bold]{remote_prefix}[/bold] ({len(uris)} files)")
+            s3.upload_directory(staging, remote_prefix)
+            print(f"[s3] uploaded {remote_prefix}", flush=True)
         except Exception as e:
-            console.print(f"  [yellow]⚠[/yellow] S3 checkpoint upload failed for {remote_prefix}: {e}")
+            print(f"[s3] upload failed {remote_prefix}: {e}", flush=True)
         finally:
-            try:
-                shutil.rmtree(staging)
-            except Exception:
-                pass
-
-    _get_upload_pool().submit(_do_upload)
+            shutil.rmtree(staging, ignore_errors=True)
+    _get_pool().submit(_do)
 
 
-# ─────────────────────────────────────────────────────────────
-# SHARD LOADING
-# ─────────────────────────────────────────────────────────────
-
-def load_pretokenized_data(
-        data_dir: Optional[str],
-        s3_client: Optional[S3Client],
-        cache_dir: Path,
-) -> tuple[torch.Tensor, Tokenizer, dict]:
-    """Load pre-tokenized shards + tokenizer from local dir or S3.
-
-    Returns (tokens_tensor, tokenizer, metadata_dict).
-    """
-    if s3_client is not None:
-        local_dir = cache_dir / "pretokenized"
-        local_dir.mkdir(parents=True, exist_ok=True)
-
-        # Download metadata (always re-download — tiny file, may have changed)
-        meta_path = local_dir / "pretokenized_meta.json"
-        console.print("  Downloading [bold]pretokenized_meta.json[/bold] from S3...")
-        s3_client.download("pretokenized_meta.json", meta_path)
-
-        with meta_path.open("r") as f:
-            meta = json.load(f)
-
-        # Download tokenizer (cache if already present)
-        tok_path = local_dir / "tokenizer.json"
-        if tok_path.exists():
-            console.print("  [dim]tokenizer.json (cached)[/dim]")
-        else:
-            console.print("  Downloading [bold]tokenizer.json[/bold] from S3...")
-            s3_client.download("tokenizer.json", tok_path)
-
-        # Download shards
-        shards_dir = local_dir / "shards"
-        shards_dir.mkdir(exist_ok=True)
-        shard_records = meta["shards"]
-
-        console.print(f"  Downloading [bold]{len(shard_records)}[/bold] shards from S3...")
-        with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(bar_width=30),
-                MofNCompleteColumn(),
-                TimeElapsedColumn(),
-                console=console,
-                transient=True,
-        ) as progress:
-            task = progress.add_task("Shards", total=len(shard_records))
-            for rec in shard_records:
-                filename = rec["filename"]
-                shard_path = shards_dir / filename
-                if shard_path.exists() and shard_path.stat().st_size == rec["num_bytes"]:
-                    progress.update(task, advance=1, description=f"[dim]{filename} (cached)[/dim]")
-                    continue
-                remote_name = f"shards/{filename}"
-                progress.update(task, description=f"{filename} ({rec['num_bytes'] / 1e6:.0f} MB)")
-                s3_client.download(remote_name, shard_path)
-                progress.update(task, advance=1)
-
-    elif data_dir is not None:
-        local_dir = Path(data_dir)
-        meta_path = local_dir / "pretokenized_meta.json"
-        if not meta_path.exists():
-            console.print(f"  [bold red]✗[/bold red] pretokenized_meta.json not found in {local_dir}")
-            sys.exit(1)
-
-        with meta_path.open("r") as f:
-            meta = json.load(f)
-
-        tok_path = local_dir / "tokenizer.json"
-        shards_dir = local_dir / "shards"
-        shard_records = meta["shards"]
-    else:
-        console.print("  [bold red]✗[/bold red] Provide --data (local) or --s3_bucket (S3) for pre-tokenized data")
-        sys.exit(1)
-
-    # Load tokenizer
-    tokenizer = Tokenizer.from_file(str(tok_path))
-    console.print(f"  [green]✓[/green] Tokenizer loaded: vocab_size=[bold]{tokenizer.get_vocab_size()}[/bold]")
-
-    # Shards → ONE on-disk memmap (concatenated), then mmap read-only. We do NOT load the
-    # whole corpus into RAM: np.concatenate would spike to ~2× corpus (all shards + result,
-    # ~80GB at 19B tok) and, under multi-GPU (accelerate launch = N processes), every rank
-    # would duplicate it (N×, e.g. 4×41GB=164GB + concat spikes → OOM). Instead we pack the
-    # shards shard-by-shard into a single .u16 file (peak RAM ≈ one shard) and memmap it:
-    # the OS page-cache is SHARED across ranks, so physical RAM ≈ corpus size ONCE, not N×.
-    # __getitem__ still casts each chunk to long per-batch and computes doc_ids on the fly.
-    import fcntl
-    _dtype = "<u2" if str(meta.get("dtype", "uint32")).lower() == "uint16" else "<u4"
-    itemsize = np.dtype(_dtype).itemsize
-
-    # total tokens from file sizes — no RAM load
-    total_tokens = 0
-    for rec in shard_records:
-        shard_path = shards_dir / rec["filename"]
-        if not shard_path.exists():
-            console.print(f"  [bold red]✗[/bold red] Shard missing: {shard_path}")
-            sys.exit(1)
-        total_tokens += shard_path.stat().st_size // itemsize
-
-    mmap_path = shards_dir.parent / "_packed_corpus.u16"
-    lock_path = shards_dir.parent / "_packed_corpus.lock"
-    expected_bytes = total_tokens * itemsize
-
-    # Build the concatenated memmap once. Race-safe across ranks via an exclusive file lock,
-    # and crash-safe via write-to-tmp + atomic rename (a half-written file never looks valid).
-    with open(lock_path, "w") as _lf:
-        fcntl.flock(_lf, fcntl.LOCK_EX)
-        try:
-            if not (mmap_path.exists() and mmap_path.stat().st_size == expected_bytes):
-                tmp_path = mmap_path.with_suffix(".u16.tmp")
-                out = np.memmap(str(tmp_path), dtype=_dtype, mode="w+", shape=(total_tokens,))
-                off = 0
-                with Progress(
-                        SpinnerColumn(),
-                        TextColumn("[progress.description]{task.description}"),
-                        BarColumn(bar_width=30),
-                        MofNCompleteColumn(),
-                        TimeElapsedColumn(),
-                        console=console,
-                        transient=True,
-                ) as progress:
-                    task = progress.add_task(f"Packing {len(shard_records)} shards → memmap", total=len(shard_records))
-                    for rec in shard_records:
-                        arr = np.fromfile(str(shards_dir / rec["filename"]), dtype=_dtype)
-                        out[off: off + len(arr)] = arr
-                        off += len(arr)
-                        progress.update(task, advance=1, description=f"Packing shards ({off:,} tokens)")
-                out.flush()
-                del out
-                tmp_path.replace(mmap_path)  # atomic: final file appears only when complete
-        finally:
-            fcntl.flock(_lf, fcntl.LOCK_UN)
-
-    # Read-only memmap: shared page-cache across ranks, RAM ≈ corpus once. Per-batch long
-    # cast + on-the-fly doc_ids keep the working set tiny (see TextDataset/PackedDataset).
-    tokens = np.memmap(str(mmap_path), dtype=_dtype, mode="r")
-    console.print(
-        f"  [green]✓[/green] Corpus [bold]{total_tokens:,}[/bold] tokens memmapped "
-        f"([cyan]{tokens.nbytes / 1e9:.2f} GB[/cyan] on disk, shared page-cache, dtype {tokens.dtype})")
-
-    # Sanity check
-    expected = meta.get("total_tokens", 0)
-    if expected > 0 and total_tokens != expected:
-        console.print(f"  [yellow]⚠[/yellow] Token count mismatch: loaded {total_tokens:,} vs meta {expected:,}")
-
+# ── telemetry ──
+def gpu_telemetry():
     try:
-        import psutil
-        console.print(f"  [dim]RAM after loading: {psutil.Process().memory_info().rss / 1e9:.1f} GB[/dim]")
-    except ImportError:
-        pass
+        q = "power.draw,utilization.gpu,memory.used,memory.total,temperature.gpu,clocks.sm"
+        out = subprocess.run(["nvidia-smi", f"--query-gpu={q}", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+        gpus = []
+        for i, line in enumerate(out.splitlines()):
+            v = [c.strip() for c in line.split(",")]
+            try:
+                gpus.append({"idx": i, "power_w": float(v[0]), "util_pct": float(v[1]),
+                             "mem_used_mb": float(v[2]), "mem_total_mb": float(v[3]),
+                             "temp_c": float(v[4]), "sm_clock_mhz": float(v[5])})
+            except (ValueError, IndexError):
+                continue
+        return gpus
+    except Exception:
+        return []
 
-    return tokens, tokenizer, meta
-
-
-# ─────────────────────────────────────────────────────────────
-# DATASETS
-# ─────────────────────────────────────────────────────────────
-
-class TextDataset(Dataset):
-    """Tokenized text dataset for causal language modeling.
-
-    Uses deterministic slicing: chunk[idx] starts at idx * seq_len.
-    This ensures validation loss is reproducible across evaluations.
-    """
-
-    def __init__(self, tokens, seq_len):
-        self.tokens = tokens
-        self.seq_len = seq_len
-        self.n_samples = max(1, (len(tokens) - 1) // seq_len)
-
-    def __len__(self):
-        return self.n_samples
-
-    def __getitem__(self, idx):
-        start = idx * self.seq_len
-        x = self.tokens[start: start + self.seq_len]
-        y = self.tokens[start + 1: start + self.seq_len + 1]
-        min_len = min(len(x), len(y))
-        # numpy(uint16) -> torch.long per batch (casting the whole corpus to int64 would OOM)
-        x = torch.from_numpy(np.asarray(x[:min_len], dtype=np.int64))
-        y = torch.from_numpy(np.asarray(y[:min_len], dtype=np.int64))
-        return x, y
-
-
-class PackedDataset(Dataset):
-    """
-    Packed dataset: concatenate all tokens and slice into exact chunks.
-
-    Eliminates padding waste — every token in every batch is a real token.
-    Multiple documents are packed into each chunk, separated by BOS/EOS.
-
-    When document boundaries are provided, also returns document_ids per chunk
-    for FlexAttention document masking (prevents cross-doc attention leakage).
-    """
-
-    def __init__(self, tokens, seq_len, bos_id=None):
-        n_chunks = len(tokens) // (seq_len + 1)
-        if n_chunks == 0:
-            n_chunks = 1
-            pad = np.zeros(seq_len + 1 - len(tokens), dtype=tokens.dtype)
-            tokens = np.concatenate([tokens, pad])
-        self.total_tokens = n_chunks * (seq_len + 1)
-        # numpy view (no copy) — stays uint16 in RAM; cast to long happens per-batch
-        self.chunks = tokens[:self.total_tokens].reshape(n_chunks, seq_len + 1)
-        self.bos_id = bos_id           # set -> document_ids computed on the fly per chunk
-
-    def __len__(self):
-        return len(self.chunks)
-
-    def __getitem__(self, idx):
-        chunk = self.chunks[idx]
-        x = torch.from_numpy(np.asarray(chunk[:-1], dtype=np.int64))
-        y = torch.from_numpy(np.asarray(chunk[1:], dtype=np.int64))
-        if self.bos_id is not None:
-            # document_ids on the fly: a new id at each <bos> in the window. The mask
-            # only checks EQUALITY (same doc), so per-chunk RELATIVE ids are exact — and
-            # cost ~0 RAM vs a full int64 doc_ids tensor the size of the whole corpus.
-            doc_ids = torch.from_numpy(np.cumsum(chunk[:-1] == self.bos_id, dtype=np.int64))
-            return x, y, doc_ids
-        return x, y
-
-
-# ─────────────────────────────────────────────────────────────
-# DATA PIPELINE
-# ─────────────────────────────────────────────────────────────
-
-def _count_bos(tokens, bos_id):
-    """Count document starts (BOS occurrences) — for the log only; the actual
-    per-token document_ids are computed per-chunk in PackedDataset (no giant tensor)."""
-    if bos_id is None:
-        return 0
-    return int(np.count_nonzero(tokens == bos_id))
-
-
-def build_datasets(
-        tokens: torch.Tensor,
-        tokenizer: Tokenizer,
-        seq_len: int,
-        val_split: float = 0.05,
-        packing: bool = True,
-) -> tuple:
-    """Split tokens into train/val and build Dataset objects."""
-    split = int(len(tokens) * (1 - val_split))
-    train_tokens = tokens[:split]
-    val_tokens = tokens[split:]
-
-    # Document masking: doc_ids are computed PER-CHUNK inside PackedDataset from the
-    # <bos> positions in each window (no full-corpus doc_ids tensor). Here we only need
-    # bos_id + a cheap count for the log.
-    doc_mask_on = False
-    bos_id = None
-    if packing:
-        bos_id = tokenizer.token_to_id("<bos>")
-        n_bos = _count_bos(tokens, bos_id)
-        if n_bos > 0:
-            doc_mask_on = True
-            console.print(f"  [green]✓[/green] [bold]{n_bos:,}[/bold] documents (BOS) — document masking ON")
-        else:
-            bos_id = None
-            console.print("  [yellow]⚠[/yellow] No BOS tokens found — packing without document masking")
-
-    if packing:
-        train_ds = PackedDataset(train_tokens, seq_len, bos_id=bos_id)
-        val_ds = PackedDataset(val_tokens, seq_len, bos_id=bos_id)
-    else:
-        train_ds = TextDataset(train_tokens, seq_len)
-        val_ds = TextDataset(val_tokens, seq_len)
-
-    mode = "packed" if packing else "strided"
-    has_mask = " + doc masking" if packing and doc_mask_on else ""
-
-    data_table = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
-    data_table.add_column(style="bold")
-    data_table.add_column()
-    data_table.add_row("Train", f"{len(train_tokens):,} tokens → {len(train_ds)} {mode} chunks{has_mask}")
-    data_table.add_row("Val", f"{len(val_tokens):,} tokens → {len(val_ds)} {mode} chunks")
-    console.print(data_table)
-
-    return train_ds, val_ds
-
-
-# ─────────────────────────────────────────────────────────────
-# LEARNING RATE SCHEDULES
-# ─────────────────────────────────────────────────────────────
-
-def get_lr_cosine(step, warmup_steps, max_steps, max_lr, min_lr):
-    """Cosine decay with linear warmup — standard LLM schedule."""
-    if step < warmup_steps:
-        return max_lr * (step + 1) / warmup_steps
-    if step >= max_steps:
-        return min_lr
-    progress = (step - warmup_steps) / (max_steps - warmup_steps)
-    return min_lr + 0.5 * (max_lr - min_lr) * (1 + math.cos(math.pi * progress))
-
-
-def get_lr_wsd(step, warmup_steps, max_steps, max_lr, min_lr, decay_ratio=0.1):
-    """
-    Warmup-Stable-Decay schedule (DeepSeek-V3, MiniCPM, OLMo 2, GLM-4.5).
-
-    Three phases:
-      1. Warmup:  linear ramp from 0 to max_lr
-      2. Stable:  constant max_lr (bulk of training — model explores loss landscape)
-      3. Decay:   linear decay to min_lr (final convergence into local minimum)
-
-    Advantages over cosine:
-      - No need to know max_steps in advance during stable phase
-      - Can pause/resume training freely during stable phase
-      - Theoretically optimal for hard-task regime (arxiv:2602.06797)
-      - Better SFT downstream: models stay in flatter minima (OpenReview 2025)
-
-    Args:
-        decay_ratio: fraction of total steps for decay phase (default 0.1 = last 10%)
-    """
-    if step < warmup_steps:
-        return max_lr * (step + 1) / warmup_steps
-    if step >= max_steps:
-        return min_lr
-
-    decay_steps = max(1, int(max_steps * decay_ratio))
-    stable_end = max_steps - decay_steps
-
-    if step < stable_end:
-        return max_lr
-
-    progress = (step - stable_end) / decay_steps
-    return min_lr + (max_lr - min_lr) * (1.0 - progress)
-
-
-def get_lr(step, warmup_steps, max_steps, max_lr, min_lr, schedule="cosine", decay_ratio=0.1):
-    """Dispatch to the appropriate LR schedule."""
-    if schedule == "wsd":
-        return get_lr_wsd(step, warmup_steps, max_steps, max_lr, min_lr, decay_ratio)
-    return get_lr_cosine(step, warmup_steps, max_steps, max_lr, min_lr)
-
-
-# ─────────────────────────────────────────────────────────────
-# EVALUATION
-# ─────────────────────────────────────────────────────────────
 
 @torch.no_grad()
-def evaluate(model, val_loader, device, max_batches=50, dtype=torch.bfloat16):
-    """Run evaluation and return average loss."""
-    model.eval()
-    total_loss = 0.0
-    n = 0
-    for i, batch in enumerate(val_loader):
-        if i >= max_batches:
-            break
-
-        if len(batch) == 3:
-            x, y, doc_ids = batch
-            x, y, doc_ids = x.to(device), y.to(device), doc_ids.to(device)
-        else:
-            x, y = batch
-            x, y = x.to(device), y.to(device)
-            doc_ids = None
-
-        with torch.amp.autocast(device_type=device.type, dtype=dtype):
-            out = model(x, labels=y, document_ids=doc_ids)
-        total_loss += out["loss"].item()
-        n += 1
-    model.train()
-    return total_loss / max(n, 1)
+def global_weight_norm(m):
+    s = 0.0
+    for p in m.parameters():
+        s += float(p.detach().float().pow(2).sum().item())
+    return math.sqrt(s)
 
 
-# ─────────────────────────────────────────────────────────────
-# TRAINING LOOP
-# ─────────────────────────────────────────────────────────────
-
-def _make_train_progress(console_obj: Console) -> Progress:
-    """Build the rich Progress bar for the training loop."""
-    return Progress(
-        TextColumn("[bold blue]{task.description}"),
-        BarColumn(bar_width=40, complete_style="green", finished_style="bold green"),
-        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        TextColumn("•"),
-        TimeElapsedColumn(),
-        TextColumn("•"),
-        TimeRemainingColumn(),
-        console=console_obj,
-        refresh_per_second=2,
-    )
+@torch.no_grad()
+def matrix_norms(m, k=8):
+    mats = [(n, p) for n, p in m.named_parameters() if p.ndim >= 2]
+    if not mats:
+        return {}
+    n = len(mats)
+    idx = sorted(set([0, n - 1] + [round(i * (n - 1) / max(1, k - 1)) for i in range(k)]))
+    return {mats[i][0]: float(mats[i][1].detach().float().norm().item()) for i in idx}
 
 
-def train(args):
-    console.print()
-    console.rule("[bold cyan]NanoTransformer Pre-Training[/bold cyan]", style="cyan")
-    console.print()
-
-    # ── Seed ──
-    torch.manual_seed(args.seed)
-    random.seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
-
-    # ── Accelerate (multi-GPU) ──
-    try:
-        from accelerate import Accelerator
-        HAS_ACCELERATE = True
-    except ImportError:
-        HAS_ACCELERATE = False
-
-    use_accelerate = args.multi_gpu and HAS_ACCELERATE
-    accelerator = None
-
-    if args.multi_gpu and not HAS_ACCELERATE:
-        console.print("  [yellow]⚠[/yellow] --multi_gpu requires accelerate: [bold]pip install accelerate[/bold]")
-        console.print("  [dim]Falling back to single device[/dim]")
-
-    if use_accelerate:
-        mixed = "bf16" if args.bf16 else ("fp16" if args.fp16 else "no")
-        accelerator = Accelerator(mixed_precision=mixed)
-        device = accelerator.device
-        is_main = accelerator.is_main_process
-        if is_main:
-            console.print(f"  🚀 [bold green]Multi-GPU[/bold green]: {accelerator.num_processes} processes (accelerate)")
-            console.print(f"     Device: [cyan]{device}[/cyan]")
-    else:
-        is_main = True
-
-    # ── Device (single GPU/CPU/MPS) ──
-    if not use_accelerate:
-        if torch.cuda.is_available():
-            device = torch.device("cuda")
-            gpu_name = torch.cuda.get_device_name()
-            vram_total = torch.cuda.get_device_properties(0).total_memory / 1e9
-            console.print(f"  🔥 [bold green]GPU[/bold green]: {gpu_name}")
-            console.print(f"     VRAM: [cyan]{vram_total:.1f} GB[/cyan]")
-        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            device = torch.device("mps")
-            console.print("  🍎 [bold green]Using Apple MPS[/bold green]")
-        else:
-            device = torch.device("cpu")
-            console.print("  💻 [bold yellow]Using CPU[/bold yellow]")
-
-    dtype = torch.float32
-    if not use_accelerate:
-        if args.bf16 and device.type == "cuda" and torch.cuda.is_bf16_supported():
-            dtype = torch.bfloat16
-            console.print("  [dim]Using bfloat16 mixed precision[/dim]")
-        elif args.fp16 and device.type == "cuda":
-            dtype = torch.float16
-            console.print("  [dim]Using float16 mixed precision[/dim]")
-
-    # ── S3 client ──
-    s3_client: Optional[S3Client] = None
-    if args.s3_bucket:
-        s3_client = S3Client(
-            bucket=args.s3_bucket,
-            prefix=args.s3_prefix or "",
-            region=args.s3_region or "us-east-1",
-        )
-
-    # ── Load pre-tokenized data ──
-    console.print()
-    console.rule("[bold]Data Loading[/bold]", style="dim")
-    cache_dir = Path(args.out_dir) / ".cache"
-    all_tokens, tokenizer, meta = load_pretokenized_data(
-        data_dir=args.data,
-        s3_client=s3_client,
-        cache_dir=cache_dir,
-    )
-    vocab_size = tokenizer.get_vocab_size()
-
-    # ── Model ──
-    console.print()
-    console.rule("[bold]Model[/bold]", style="dim")
-    if args.resume:
-        console.print(f"  [cyan]↻[/cyan] Resuming from [bold]{args.resume}[/bold]")
-        model = NanoTransformer.from_pretrained(args.resume)
-        config = model.config
-    else:
-        config_overrides = dict(
-            max_seq_len=args.seq_len,
-            dropout=args.dropout,
-        )
-        if args.mup_base_d_model is not None:
-            config_overrides["mup_base_d_model"] = args.mup_base_d_model
-        config = get_config(
-            preset=args.preset,
-            vocab_size=vocab_size,
-            **config_overrides,
-        )
-        model = NanoTransformer(config)
-
-    model = model.to(device)
-    n_params = model.count_params()
-    use_mup = config.mup_base_d_model is not None
-
-    if is_main:
-        model_table = Table(
-            title=f"🧠 {args.preset.upper()} — {n_params:,} parameters",
-            box=box.ROUNDED,
-            title_style="bold magenta",
-            border_style="dim",
-            padding=(0, 1),
-        )
-        model_table.add_column("Parameter", style="bold")
-        model_table.add_column("Value", style="cyan")
-        model_table.add_row("d_model", str(config.d_model))
-        model_table.add_row("n_heads", str(config.n_heads))
-        model_table.add_row("n_layers", str(config.n_layers))
-        model_table.add_row("d_ff", str(config.d_ff))
-        model_table.add_row("seq_len", str(config.max_seq_len))
-        model_table.add_row("vocab_size", f"{vocab_size:,}")
-        console.print(model_table)
-
-        if use_mup:
-            console.print(f"  📐 [bold]µP enabled[/bold] — base_d={config.mup_base_d_model}, "
-                          f"width_mult={config.mup_width_mult:.1f}x, "
-                          f"hidden_lr_mult={1.0 / config.mup_width_mult:.4f}")
-        if HAS_FLEX_ATTENTION:
-            console.print("  🔒 [green]FlexAttention available[/green] — document masking at zero VRAM cost")
-        else:
-            console.print("  [yellow]⚠[/yellow] FlexAttention not available — packing without document masking")
-
-    # ── Auto batch size ──
-    if args.batch_size == 0 and device.type == "cuda":
-        vram_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
-        param_mem_gb = n_params * 2 / 1e9
-        available = vram_gb - param_mem_gb * 4
-        bytes_per_sample = config.max_seq_len * config.d_model * config.n_layers * 4
-        estimated_batch = max(1, int(available * 1e9 / bytes_per_sample))
-        args.batch_size = min(estimated_batch, 64)
-        if is_main:
-            console.print(
-                f"  [green]✓[/green] Auto batch_size: [bold]{args.batch_size}[/bold] (VRAM: {vram_gb:.0f}GB, available: {available:.1f}GB)")
-    elif args.batch_size == 0:
-        args.batch_size = 4
-        if is_main:
-            console.print(f"  [green]✓[/green] Auto batch_size: [bold]{args.batch_size}[/bold] (non-CUDA device)")
-
-    # ── Gradient checkpointing ──
-    if args.gradient_checkpointing:
-        model.gradient_checkpointing_enable()
-        console.print("  ♻ [green]Gradient checkpointing attivo[/green]")
-
-    # ── torch.compile ──
-    if args.compile:
+def save_ckpt(path, raw_model, opt, step, tokens_seen, args, best_val, ds=None, train_pf=None, s3=None):
+    """Atomic save (tmp -> os.replace, .prev backup) of model + opt + RNG + sampler/prefetch RNG.
+    Optional fire-and-forget S3 upload of the finished checkpoint dir."""
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True, exist_ok=True)
+    raw_model.save_pretrained(str(tmp))
+    state = {
+        "opt": opt.state_dict(), "step": step, "tokens_seen": tokens_seen,
+        "best_val": best_val, "torch_rng": torch.get_rng_state(),
+        "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+        "args": vars(args),
+    }
+    if ds is not None:
         try:
-            model = torch.compile(model)
-            console.print("  ⚡ [green]torch.compile() attivo[/green]")
-        except Exception as e:
-            console.print(f"  [yellow]⚠[/yellow] torch.compile() non disponibile: {e}")
+            state["sampler_rng"] = ds.rng.bit_generator.state
+        except Exception:
+            pass
+    if train_pf is not None:
+        try:
+            state["train_pf_rng"] = train_pf.rng_state()
+        except Exception:
+            pass
+    torch.save(state, tmp / "training_state.pt")
+    bak = path.with_name(path.name + ".prev")
+    if path.exists():
+        shutil.rmtree(bak, ignore_errors=True)
+        os.replace(path, bak)
+    os.replace(tmp, path)
+    shutil.rmtree(bak, ignore_errors=True)
+    if s3 is not None:
+        async_upload_checkpoint(s3, str(path), path.name)
 
-    # ── Build datasets ──
-    console.print()
-    console.rule("[bold]Datasets[/bold]", style="dim")
-    train_ds, val_ds = build_datasets(
-        tokens=all_tokens,
-        tokenizer=tokenizer,
-        seq_len=config.max_seq_len,
-        packing=args.packing,
-    )
-
-    # Free raw tokens — datasets hold their own slices
-    del all_tokens
-
-    train_loader = DataLoader(
-        train_ds, batch_size=args.batch_size, shuffle=True,
-        num_workers=args.num_workers, pin_memory=(device.type == "cuda"),
-    )
-    val_loader = DataLoader(
-        val_ds, batch_size=args.batch_size, shuffle=False,
-        num_workers=0, pin_memory=(device.type == "cuda"),
-    )
-
-    # ── Optimizer ──
-    use_fused = device.type == "cuda" and not use_accelerate
-
-    if use_mup:
-        param_groups = model.mup_param_groups(args.lr, args.weight_decay)
-        optimizer = torch.optim.AdamW(
-            param_groups, betas=(0.9, 0.95), eps=1e-8, fused=use_fused,
-        )
-        if is_main:
-            opt_table = Table(title="µP Param Groups", box=box.SIMPLE, border_style="dim")
-            opt_table.add_column("Group", style="bold")
-            opt_table.add_column("Params", justify="right")
-            opt_table.add_column("LR", justify="right", style="cyan")
-            opt_table.add_column("WD", justify="right")
-            for g in param_groups:
-                n_p = sum(p.numel() for p in g["params"])
-                opt_table.add_row(g["name"], f"{n_p:,}", f"{g['lr']:.2e}", f"{g['weight_decay']}")
-            console.print(opt_table)
-    else:
-        # exclude norm/bias (1D) AND embeddings/lm_head from weight decay (consistent with mup_param_groups)
-        decay_params, nodecay_params = [], []
-        for n, p in model.named_parameters():
-            (nodecay_params if (p.dim() < 2 or "emb" in n.lower() or "lm_head" in n.lower())
-             else decay_params).append(p)
-        optimizer = torch.optim.AdamW([
-            {"params": decay_params, "weight_decay": args.weight_decay},
-            {"params": nodecay_params, "weight_decay": 0.0},
-        ], lr=args.lr, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
-
-        n_decay = sum(p.numel() for p in decay_params)
-        n_nodecay = sum(p.numel() for p in nodecay_params)
-        if is_main:
-            console.print(f"  [dim]Decay params: {n_decay:,} | No-decay params: {n_nodecay:,}[/dim]")
-
-    # ── Accelerate: prepare ──
-    if use_accelerate:
-        model, optimizer, train_loader = accelerator.prepare(model, optimizer, train_loader)
-        val_loader = accelerator.prepare(val_loader)
-
-    # ── Wandb ──
-    if args.wandb and is_main:
-        import wandb
-        wandb.init(project=args.wandb_project, name=args.wandb_run, config=vars(args))
-        wandb.watch(model, log_freq=100)
-
-    # ── Training ──
-    os.makedirs(args.out_dir, exist_ok=True)
-    scaler = torch.amp.GradScaler(enabled=(dtype == torch.float16 and not use_accelerate))
-
-    model.train()
-    step = 0
-    best_val_loss = float("inf")
-    t0 = time.time()
-    tokens_processed = 0
-
-    # log grad_norm
-    grad_norm = torch.tensor(0.0)  # ← aggiungi qui
-
-    # Resume training state
-    if args.resume:
-        state_path = os.path.join(args.resume, "training_state.pt")
-        if os.path.exists(state_path):
-            if is_main:
-                console.print(f"  [cyan]↻[/cyan] Restoring optimizer & training state...")
-            training_state = torch.load(state_path, map_location=device, weights_only=False)
-            optimizer.load_state_dict(training_state["optimizer"])
-            if not use_accelerate:
-                scaler.load_state_dict(training_state["scaler"])
-            step = training_state["step"] + 1
-            best_val_loss = training_state.get("best_val_loss", float("inf"))
-            tokens_processed = training_state.get("tokens_processed", 0)
-            if is_main:
-                console.print(
-                    f"  [green]✓[/green] Resumed from step [bold]{step}[/bold] (best_val={best_val_loss:.4f})")
-
-    min_lr = args.lr * 0.1
-
-    if is_main:
-        schedule_info = args.lr_schedule
-        if args.lr_schedule == "wsd":
-            schedule_info += f", decay_ratio={args.lr_decay_ratio} (last {args.lr_decay_ratio * 100:.0f}%)"
-
-        train_cfg_table = Table(box=box.ROUNDED, border_style="cyan", title="🚀 Training Configuration",
-                                title_style="bold cyan")
-        train_cfg_table.add_column("Setting", style="bold")
-        train_cfg_table.add_column("Value", style="white")
-        train_cfg_table.add_row("Max steps", f"{args.max_steps:,}")
-        train_cfg_table.add_row("Batch size", str(args.batch_size))
-        train_cfg_table.add_row("Grad accumulation", str(args.grad_accum))
-        train_cfg_table.add_row("Effective batch", str(args.batch_size * args.grad_accum))
-        train_cfg_table.add_row("Learning rate", f"{args.lr:.2e}")
-        train_cfg_table.add_row("Warmup steps", str(args.warmup_steps))
-        train_cfg_table.add_row("Schedule", schedule_info)
-        if use_mup:
-            train_cfg_table.add_row("µP base_d", str(config.mup_base_d_model))
-        console.print()
-        console.print(train_cfg_table)
-        console.print()
-
-    def unwrap_model():
-        if use_accelerate:
-            return accelerator.unwrap_model(model)
-        return model
-
-    def save_checkpoint(name: str, is_best: bool = False):
-        """Save checkpoint locally + async upload to S3."""
-        save_path = os.path.join(args.out_dir, name)
-        unwrap_model().save_pretrained(save_path)
-        tokenizer.save(os.path.join(save_path, "tokenizer.json"))
-        torch.save({
-            "optimizer": optimizer.state_dict(),
-            "scaler": scaler.state_dict(),
-            "step": step,
-            "best_val_loss": best_val_loss,
-            "tokens_processed": tokens_processed,
-        }, os.path.join(save_path, "training_state.pt"))
-
-        label = "Best model" if is_best else "Checkpoint"
-        extra = f" (val_loss={best_val_loss:.4f})" if is_best else ""
-        style = "bold green" if is_best else "bold"
-        console.print(f"  💾 [{style}]{label} saved[/{style}]: {save_path}{extra}")
-
-        # Async S3 upload (best-effort)
-        if s3_client is not None:
-            run_name = os.path.basename(args.out_dir.rstrip("/"))
-            remote_prefix = f"{run_name}/{name}"
-            async_upload_checkpoint(s3_client, save_path, remote_prefix)
-
-    # ── Training progress bar ──
-    train_progress = _make_train_progress(console)
-    train_progress.start()
-    train_task = train_progress.add_task("Training", total=args.max_steps, completed=step)
-
-    while step < args.max_steps:
-        for batch in train_loader:
-            if step >= args.max_steps:
-                break
-
-            # Unpack batch (with or without doc_ids)
-            if len(batch) == 3:
-                x, y, doc_ids = batch
-            else:
-                x, y = batch
-                doc_ids = None
-
-            lr = get_lr(step, args.warmup_steps, args.max_steps, args.lr, min_lr,
-                        schedule=args.lr_schedule, decay_ratio=args.lr_decay_ratio)
-
-            # Apply LR schedule — scale all groups proportionally.
-            # Capture each group's base LR ONCE. Must use dict-membership ("not in"),
-            # NOT hasattr: param_groups are dicts, so hasattr(pg, "_base_lr_set") is
-            # always False, which re-captured the already-scheduled LR every step and
-            # compounded it toward 0 (silent LR collapse). Mirrors bin.sft.py.
-            for pg in optimizer.param_groups:
-                if use_mup:
-                    if "_base_lr_set" not in pg:
-                        pg["_base_lr"] = pg["lr"]
-                        pg["_base_lr_set"] = True
-                    pg["lr"] = pg["_base_lr"] * (lr / args.lr)
-                else:
-                    pg["lr"] = lr
-
-            if not use_accelerate:
-                x, y = x.to(device), y.to(device)
-                if doc_ids is not None:
-                    doc_ids = doc_ids.to(device)
-
-            # Forward + backward
-            if use_accelerate:
-                out = model(x, labels=y, document_ids=doc_ids)
-                loss = out["loss"] / args.grad_accum
-                accelerator.backward(loss)
-            else:
-                with torch.amp.autocast(device_type=device.type, dtype=dtype, enabled=(dtype != torch.float32)):
-                    out = model(x, labels=y, document_ids=doc_ids)
-                    loss = out["loss"] / args.grad_accum
-                scaler.scale(loss).backward()
-
-            tokens_processed += x.numel()
-
-            if (step + 1) % args.grad_accum == 0 or step == args.max_steps - 1:
-                if use_accelerate:
-                    grad_norm = accelerator.clip_grad_norm_(model.parameters(), args.grad_clip)
-                    optimizer.step()
-                else:
-                    scaler.unscale_(optimizer)
-                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-                    scaler.step(optimizer)
-                    scaler.update()
-                optimizer.zero_grad(set_to_none=True)
-
-            # ── Logging ──
-            if step % args.log_every == 0 and is_main:
-                dt = time.time() - t0
-                tok_per_sec = tokens_processed / max(dt, 1e-6)
-                raw_loss = loss.item() * args.grad_accum
-                display_lr = lr
-                if use_mup:
-                    for pg in optimizer.param_groups:
-                        if pg.get("name") == "hidden":
-                            display_lr = pg["lr"]
-                            break
-
-                loss_color = "green" if raw_loss < 4.0 else ("yellow" if raw_loss < 6.0 else "red")
-                train_progress.update(
-                    train_task,
-                    completed=step,
-                    description=(
-                        f"[bold]step {step:>6d}[/bold] │ "
-                        f"loss [{loss_color}]{raw_loss:.4f}[/{loss_color}] │ "
-                        f"lr [cyan]{display_lr:.2e}[/cyan] │ "
-                        f"∇ {grad_norm:.3f} │ "
-                        f"[dim]{tok_per_sec:,.0f} tok/s[/dim]"
-                    ),
-                )
-
-                if args.wandb:
-                    import wandb
-                    wandb.log({"train/loss": raw_loss, "train/lr": lr,
-                               "train/tok_per_sec": tok_per_sec,
-                               "train/grad_norm": grad_norm.item()}, step=step)
-
-            # ── Evaluation ──
-            if step > 0 and step % args.eval_every == 0 and is_main:
-                train_progress.stop()
-                val_loss = evaluate(unwrap_model(), val_loader, device, dtype=dtype)
-                console.print(f"  ✦ val_loss: [bold magenta]{val_loss:.4f}[/bold magenta]")
-
-                if args.wandb:
-                    import wandb
-                    wandb.log({"val/loss": val_loss}, step=step)
-
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
-                    save_checkpoint("best", is_best=True)
-                train_progress.start()
-
-            # ── Checkpoint ──
-            if step > 0 and step % args.save_every == 0 and is_main:
-                train_progress.stop()
-                save_checkpoint(f"step_{step}")
-                train_progress.start()
-
-            # ── Sample generation ──
-            if step > 0 and step % args.sample_every == 0 and is_main:
-                train_progress.stop()
-                raw_model = unwrap_model()
-                raw_model.eval()
-                # Seed with a clean single <bos>: encoding the literal string
-                # "<bos>" with the post-processor active yields [bos, bos, eos].
-                bos_id = tokenizer.token_to_id("<bos>")
-                if bos_id is None:
-                    bos_id = getattr(raw_model.config, "bos_token_id", 0) or 0
-                input_ids = torch.tensor([[bos_id]], device=device)
-                gen = raw_model.generate(input_ids, max_new_tokens=100, temperature=0.8, repetition_penalty=1.2)
-                text = tokenizer.decode(gen[0].tolist())
-                console.print(Panel(
-                    Text(text[:200], style="italic"),
-                    title="📝 Sample Generation",
-                    border_style="blue",
-                    width=min(console.width, 100),
-                    padding=(0, 1),
-                ))
-                raw_model.train()
-                train_progress.start()
-
-            step += 1
-
-    train_progress.update(train_task, completed=args.max_steps)
-    train_progress.stop()
-
-    # ── Final save ──
-    if is_main:
-        total_time = time.time() - t0
-        save_checkpoint("final")
-
-        final_table = Table(box=box.DOUBLE_EDGE, border_style="green", title="✅ Training Complete",
-                            title_style="bold green")
-        final_table.add_column("Metric", style="bold")
-        final_table.add_column("Value", style="cyan")
-        final_table.add_row("Total time", f"{total_time / 60:.1f} min")
-        final_table.add_row("Final train loss", f"{loss.item() * args.grad_accum:.4f}")
-        final_table.add_row("Best val loss", f"{best_val_loss:.4f}")
-        final_table.add_row("Model saved to", os.path.join(args.out_dir, "final"))
-        if s3_client:
-            final_table.add_row("S3 checkpoints", f"s3://{args.s3_bucket}/{args.s3_prefix or ''}/checkpoints/")
-        console.print()
-        console.print(final_table)
-        console.print()
-
-    # Shutdown upload pool gracefully
-    if _upload_pool is not None:
-        console.print("  [dim]Waiting for pending S3 uploads to finish...[/dim]")
-        _upload_pool.shutdown(wait=True)
-        console.print("  [green]✓[/green] All S3 uploads completed.")
-
-
-# ─────────────────────────────────────────────────────────────
-# CLI
-# ─────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Train NanoTransformer from pre-tokenized data")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--preset", default="test")
+    ap.add_argument("--data", default=str(ROOT / "data/tokenized"))
+    ap.add_argument("--tokenizer", default=str(ROOT / "tokenizer/tokenizer.json"))
+    ap.add_argument("--max_tokens", type=float, default=None, help="default = epochs * corpus")
+    ap.add_argument("--epochs", type=float, default=1.0)
+    ap.add_argument("--max_epochs", type=float, default=4.0, help="hard clamp (data-constrained)")
+    ap.add_argument("--steps", type=int, default=None, help="override; else derived from tokens")
+    ap.add_argument("--batch_size", type=int, default=8, help="PER-GPU micro-batch")
+    ap.add_argument("--grad_accum", type=int, default=6)
+    ap.add_argument("--seq_len", type=int, default=2048)
+    ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--warmup", type=int, default=2000)
+    ap.add_argument("--min_lr_ratio", type=float, default=0.1)
+    ap.add_argument("--wd", type=float, default=0.1)
+    ap.add_argument("--lr_schedule", default="cosine", choices=["cosine", "wsd"])
+    ap.add_argument("--lr_decay_ratio", type=float, default=0.1, help="WSD: last-fraction decay")
+    ap.add_argument("--eval_every", type=int, default=1000)
+    ap.add_argument("--ckpt_every", type=int, default=2000)
+    ap.add_argument("--milestones", default="", help="comma token marks -> step_tok<N>B snapshots")
+    ap.add_argument("--grad_ckpt", action="store_true")
+    ap.add_argument("--no_prefetch", action="store_true")
+    ap.add_argument("--compile", action="store_true")
+    ap.add_argument("--doc_masking", action="store_true",
+                    help="document-masked attention (no cross-document attention in a window)")
+    ap.add_argument("--bos_id", type=int, default=None, help="bos id for doc masking (else from tokenizer)")
+    ap.add_argument("--seed", type=int, default=1234)
+    ap.add_argument("--resume", default=None, help="checkpoint dir or 'auto' = <out>/last")
+    ap.add_argument("--out", default=str(ROOT / "checkpoints/pretrain"))
+    ap.add_argument("--wandb", action="store_true")
+    ap.add_argument("--wandb_project", default="skylar-pretrain")
+    ap.add_argument("--wandb_run", default=None)
+    ap.add_argument("--s3_bucket", default=None, help="optional: async checkpoint upload bucket")
+    ap.add_argument("--s3_prefix", default="")
+    ap.add_argument("--s3_region", default=None)
+    for a in ("d_model", "n_layers", "n_heads", "n_kv_heads", "d_ff"):
+        ap.add_argument(f"--{a}", type=int, default=None)
+    args = ap.parse_args()
 
-    # Data source (local OR S3 — one is required)
-    parser.add_argument("--data", type=str, default=None,
-                        help="Local directory from pre_tokenize.py output")
+    accelerator = Accelerator(gradient_accumulation_steps=args.grad_accum)
+    device = accelerator.device
+    is_main = accelerator.is_main_process
+    world = accelerator.num_processes
+    rank = accelerator.process_index
+    amp_dtype = torch.bfloat16
 
-    # S3
-    parser.add_argument("--s3_bucket", type=str, default=None,
-                        help="AWS S3 bucket name (for data download + checkpoint upload)")
-    parser.add_argument("--s3_prefix", type=str, default=None,
-                        help="Key prefix inside bucket")
-    parser.add_argument("--s3_region", type=str, default=None,
-                        help="AWS region (e.g. eu-west-1)")
+    torch.set_float32_matmul_precision("high")
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
-    # Model
-    parser.add_argument("--preset", type=str, default="test", choices=list(PRESETS.keys()),
-                        help="Model size preset")
-    parser.add_argument("--seq_len", type=int, default=None,
-                        help="Override max sequence length from preset")
-    parser.add_argument("--dropout", type=float, default=0.0,
-                        help="Dropout (default 0.0: standard for LLM pretraining; "
-                             "the FlexAttention packed path cannot apply attn dropout)")
+    set_seed(args.seed + rank)   # per-rank: each rank draws DIFFERENT windows (true data parallelism)
+    ds = MemmapTokenDataset(args.data, seq_len=args.seq_len, seed=args.seed + rank)
+    corpus_tok = ds.total_tokens
 
-    # Training
-    parser.add_argument("--batch_size", type=int, default=8,
-                        help="Batch size (0 = auto-estimate from VRAM)")
-    parser.add_argument("--grad_accum", type=int, default=4)
-    parser.add_argument("--max_steps", type=int, default=5000)
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--warmup_steps", type=int, default=200)
-    parser.add_argument("--weight_decay", type=float, default=0.1)
-    parser.add_argument("--grad_clip", type=float, default=1.0)
+    bos_id = args.bos_id
+    if args.doc_masking and bos_id is None:
+        try:
+            bos_id = Tokenizer.from_file(args.tokenizer).token_to_id("<bos>")
+        except Exception:
+            bos_id = None
+    use_doc = args.doc_masking and bos_id is not None
+    batch_kwargs = {"return_doc_ids": True, "bos_id": bos_id} if use_doc else {}
 
-    # LR Schedule
-    parser.add_argument("--lr_schedule", type=str, default="cosine",
-                        choices=["cosine", "wsd"])
-    parser.add_argument("--lr_decay_ratio", type=float, default=0.1,
-                        help="WSD only: fraction of training for decay phase")
+    tok_per_step = args.batch_size * args.grad_accum * args.seq_len * world
+    if args.steps:
+        total_steps = args.steps
+    else:
+        target = args.max_tokens if args.max_tokens else corpus_tok * args.epochs
+        target = min(target, corpus_tok * args.max_epochs)
+        total_steps = max(1, int(target / tok_per_step))
+    implied_epochs = total_steps * tok_per_step / max(1, corpus_tok)
+    milestones = sorted(int(float(x)) for x in args.milestones.split(",") if x.strip())
 
-    # µP
-    parser.add_argument("--mup_base_d_model", type=int, default=None,
-                        help="µP proxy model width for HP transfer")
+    overrides = {k: v for k, v in (("d_model", args.d_model), ("n_layers", args.n_layers),
+                                   ("n_heads", args.n_heads), ("n_kv_heads", args.n_kv_heads),
+                                   ("d_ff", args.d_ff)) if v is not None}
+    cfg = get_config(args.preset, vocab_size=ds.vocab_size, **overrides)
+    for attr in ("max_seq_len", "max_position_embeddings"):
+        if hasattr(cfg, attr):
+            setattr(cfg, attr, max(args.seq_len, getattr(cfg, attr, 0) or 0))
 
-    # Precision
-    parser.add_argument("--bf16", action="store_true")
-    parser.add_argument("--fp16", action="store_true")
+    model = NanoTransformer(cfg)
+    if args.grad_ckpt and hasattr(model, "gradient_checkpointing_enable"):
+        model.gradient_checkpointing_enable()
+    n_params = sum(p.numel() for p in model.parameters())
 
-    # Logging
-    parser.add_argument("--log_every", type=int, default=10)
-    parser.add_argument("--eval_every", type=int, default=500)
-    parser.add_argument("--save_every", type=int, default=1000)
-    parser.add_argument("--sample_every", type=int, default=500)
+    if getattr(cfg, "mup_base_d_model", None):
+        opt = torch.optim.AdamW(model.mup_param_groups(args.lr, args.wd), betas=(0.9, 0.95))
+    else:
+        opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd, betas=(0.9, 0.95))
 
-    # Output
-    parser.add_argument("--out_dir", type=str, default="checkpoints")
-    parser.add_argument("--resume", type=str, default=None,
-                        help="Resume from a save_pretrained checkpoint")
+    # resume: load weights BEFORE prepare (so DDP broadcasts identical weights)
+    start_step, tokens_seen, best_val = 0, 0, float("inf")
+    resume_dir = (Path(args.out) / "last") if args.resume == "auto" else (Path(args.resume) if args.resume else None)
+    resume_state = None
+    if resume_dir and (resume_dir / "training_state.pt").exists():
+        model.load_state_dict(NanoTransformer.from_pretrained(str(resume_dir)).state_dict())
+        resume_state = torch.load(resume_dir / "training_state.pt", map_location="cpu", weights_only=False)
+        start_step = resume_state["step"]; tokens_seen = resume_state["tokens_seen"]
+        best_val = resume_state.get("best_val", float("inf"))
 
-    # Wandb
-    parser.add_argument("--wandb", action="store_true")
-    parser.add_argument("--wandb_project", type=str, default="nano-transformer")
-    parser.add_argument("--wandb_run", type=str, default=None)
+    # compile BEFORE accelerate wraps it (compiling the DDP-wrapped model -> per-step recompiles,
+    # profiled 3x slower). dynamic=False: the loader feeds a fresh tensor each step; without it
+    # dynamo's dynamic-shape inference recompiles on step 2.
+    if args.compile:
+        model = torch.compile(model, dynamic=False)
+    model, opt = accelerator.prepare(model, opt)
+    raw_model = accelerator.unwrap_model(model)
+    raw_model = getattr(raw_model, "_orig_mod", raw_model)   # strip compile wrapper for save/val
 
-    # Speed
-    parser.add_argument("--compile", action="store_true")
-    parser.add_argument("--gradient_checkpointing", action="store_true")
-    parser.add_argument("--packing", action=argparse.BooleanOptionalAction, default=True,
-                        help="Pack sequences to eliminate padding (default: True)")
-    parser.add_argument("--multi_gpu", action="store_true",
-                        help="Use HuggingFace Accelerate for multi-GPU")
+    if resume_state is not None:
+        opt.load_state_dict(resume_state["opt"])
+        try:
+            torch.set_rng_state(resume_state["torch_rng"].cpu())
+            if resume_state.get("cuda_rng"):
+                torch.cuda.set_rng_state_all([r.cpu() for r in resume_state["cuda_rng"]])
+        except Exception:
+            pass
+        if resume_state.get("sampler_rng") is not None:
+            try:
+                ds.rng.bit_generator.state = resume_state["sampler_rng"]
+            except Exception:
+                pass
+        if is_main:
+            print(f"[resume] from {resume_dir} @ step {start_step} tokens {tokens_seen/1e9:.2f}B", flush=True)
 
-    # System
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--num_workers", type=int, default=None)
+    s3 = None
+    if args.s3_bucket and args.s3_region and is_main:
+        try:
+            s3 = S3Client(args.s3_bucket, args.s3_prefix, args.s3_region)
+            print(f"[s3] ckpt upload -> s3://{args.s3_bucket}/{args.s3_prefix}", flush=True)
+        except Exception as e:
+            print(f"[s3] disabled ({e})", flush=True)
 
-    args = parser.parse_args()
+    metrics_fp = None
+    use_wandb = False
+    if is_main:
+        Path(args.out).mkdir(parents=True, exist_ok=True)
+        metrics_fp = open(Path(args.out) / "metrics.jsonl", "a")
+        if args.wandb:
+            try:
+                import wandb
+                wandb.init(project=args.wandb_project, name=args.wandb_run,
+                           config={**vars(args), "n_params": n_params, "world": world,
+                                   "tok_per_step": tok_per_step, "total_steps": total_steps})
+                use_wandb = True
+            except Exception as e:
+                print(f"[wandb] disabled ({e})", flush=True)
+        print(f"device={device} preset={args.preset} params={n_params/1e6:.1f}M vocab={ds.vocab_size} "
+              f"gpus={world} corpus={corpus_tok/1e9:.2f}B seq={args.seq_len} lr_sched={args.lr_schedule} "
+              f"doc_mask={use_doc} tok/step={tok_per_step:,} total_steps={total_steps:,} "
+              f"implied_epochs={implied_epochs:.2f}", flush=True)
 
-    if args.num_workers is None:
-        args.num_workers = min(4, os.cpu_count() or 1)
+    def log_metrics(rec):
+        if not is_main:
+            return
+        metrics_fp.write(json.dumps(rec) + "\n"); metrics_fp.flush()
+        if use_wandb:
+            import wandb
+            flat = {k: v for k, v in rec.items() if isinstance(v, (int, float))}
+            for g in rec.get("gpus", []):
+                for kk, vv in g.items():
+                    if kk != "idx":
+                        flat[f"gpu{g['idx']}/{kk}"] = vv
+            wandb.log(flat, step=rec["step"])
 
-    if args.seq_len is None:
-        args.seq_len = PRESETS[args.preset]["max_seq_len"]
+    @torch.no_grad()
+    def val_loss(n=40):
+        raw_model.eval(); tot = 0.0
+        for _ in range(n):
+            batch = ds.get_batch("val", args.batch_size, device, **batch_kwargs)
+            doc = batch[2] if len(batch) == 3 else None
+            x, y = batch[0], batch[1]
+            with torch.autocast(device.type, dtype=amp_dtype, enabled=(device.type == "cuda")):
+                tot += raw_model(input_ids=x, labels=y, document_ids=doc)["loss"].item()
+        raw_model.train()
+        t = torch.tensor([tot / max(1, n)], device=device)
+        return accelerator.gather(t).mean().item()
 
-    if not args.data and not args.s3_bucket:
-        parser.error("Provide --data (local path) or --s3_bucket (AWS S3)")
+    done_ms = {m for m in milestones if (Path(args.out) / f"step_tok{int(m/1e9)}B").exists()}
+    step = start_step - 1
+    model.train(); t0 = time.time(); seen0 = tokens_seen; train_secs = 0.0
+    train_pf = None if args.no_prefetch else Prefetcher(ds, "train", args.batch_size, device,
+                                                        seed=args.seed + rank + 100000, **batch_kwargs)
+    if train_pf is not None and resume_state is not None and resume_state.get("train_pf_rng") is not None:
+        train_pf.set_rng_state(resume_state["train_pf_rng"])
+    try:
+        for step in range(start_step, total_steps):
+            lr = lr_at(step, args.warmup, total_steps, args.lr, args.min_lr_ratio,
+                       args.lr_schedule, args.lr_decay_ratio)
+            for g in opt.param_groups:
+                g["lr"] = lr * g.get("lr_scale", 1.0) if "lr_scale" in g else lr
 
-    train(args)
+            _t_step = time.time()
+            loss_accum, grad_norm = torch.zeros((), device=device), 0.0
+            for _ in range(args.grad_accum):
+                batch = train_pf.next() if train_pf is not None else ds.get_batch("train", args.batch_size, device, **batch_kwargs)
+                doc = batch[2] if len(batch) == 3 else None
+                x, y = batch[0], batch[1]
+                with accelerator.accumulate(model):
+                    with torch.autocast(device.type, dtype=amp_dtype, enabled=(device.type == "cuda")):
+                        loss = model(input_ids=x, labels=y, document_ids=doc)["loss"]
+                    accelerator.backward(loss)
+                    if accelerator.sync_gradients:
+                        grad_norm = float(accelerator.clip_grad_norm_(model.parameters(), 1.0))
+                    opt.step()
+                    opt.zero_grad(set_to_none=True)
+                loss_accum += loss.detach()        # stay on GPU — one GPU->CPU sync per step
+            train_loss = (loss_accum / args.grad_accum).item()
+            tokens_seen += tok_per_step
+            if step == start_step:
+                seen0, train_secs = tokens_seen, 0.0   # drop compile/warmup step from throughput
+            else:
+                train_secs += time.time() - _t_step
+
+            if step % args.eval_every == 0 or step == total_steps - 1:
+                vl = val_loss()
+                el = time.time() - t0
+                tps = (tokens_seen - seen0) / max(1e-9, train_secs)
+                eta_h = (total_steps - step) * tok_per_step / max(1, tps) / 3600
+                if is_main:
+                    wnorm = global_weight_norm(raw_model)
+                    upd_ratio = (lr * grad_norm / wnorm) if wnorm > 0 else 0.0
+                    rec = {"step": step, "tokens": tokens_seen, "lr": lr, "train_loss": train_loss,
+                           "val_loss": vl, "ppl": math.exp(min(vl, 20)), "tok_s": tps, "eta_h": eta_h,
+                           "grad_norm": grad_norm, "weight_norm": wnorm, "update_ratio": upd_ratio,
+                           "matrix_norms": matrix_norms(raw_model), "gpus": gpu_telemetry(), "wall_s": el}
+                    log_metrics(rec)
+                    watts = sum(g["power_w"] for g in rec["gpus"]) if rec["gpus"] else 0.0
+                    print(f"  step {step:6d}/{total_steps}  tok {tokens_seen/1e9:.2f}B  lr {lr:.2e}  "
+                          f"train {train_loss:.3f}  val {vl:.3f}  ppl {math.exp(min(vl,20)):.1f}  "
+                          f"gnorm {grad_norm:.2f}  {tps/1e3:.1f}k tok/s  {watts:.0f}W  ETA {eta_h:.1f}h", flush=True)
+                    if vl < best_val:
+                        best_val = vl
+                        save_ckpt(Path(args.out) / "best", raw_model, opt, step, tokens_seen, args, best_val, ds, train_pf, s3)
+
+            for m in milestones:
+                if m not in done_ms and tokens_seen >= m:
+                    done_ms.add(m)
+                    accelerator.wait_for_everyone()
+                    if is_main:
+                        save_ckpt(Path(args.out) / f"step_tok{int(m/1e9)}B", raw_model, opt, step, tokens_seen, args, best_val, ds, train_pf, s3)
+                        print(f"  [milestone] snapshot @ {m/1e9:.0f}B tokens (step {step})", flush=True)
+
+            if (step - start_step) > 0 and step % args.ckpt_every == 0:
+                accelerator.wait_for_everyone()
+                if is_main:
+                    save_ckpt(Path(args.out) / "last", raw_model, opt, step, tokens_seen, args, best_val, ds, train_pf, s3)
+    except BaseException as e:        # OOM / OS-kill / Ctrl-C -> save before dying
+        if is_main:
+            print(f"\n[interrupt] {type(e).__name__}: saving last checkpoint ...", flush=True)
+            try:
+                save_ckpt(Path(args.out) / "last", raw_model, opt, step + 1, tokens_seen, args, best_val, ds, train_pf, s3)
+            except Exception as e2:
+                print(f"  (last-save failed: {e2})", flush=True)
+        if not isinstance(e, KeyboardInterrupt):
+            raise
+    finally:
+        if train_pf is not None:
+            train_pf.close()       # stop prefetch thread on EVERY exit path -> no NCCL-shutdown hang
+
+    accelerator.wait_for_everyone()
+    if is_main:
+        save_ckpt(Path(args.out) / "last", raw_model, opt, min(step + 1, total_steps), tokens_seen, args, best_val, ds, train_pf, s3)
+        save_ckpt(Path(args.out) / "final", raw_model, opt, total_steps, tokens_seen, args, best_val, ds, train_pf, s3)
+        try:
+            Tokenizer.from_file(args.tokenizer).save(str(Path(args.out) / "final" / "tokenizer.json"))
+        except Exception:
+            pass
+        if metrics_fp:
+            metrics_fp.close()
+        print(f"\nDONE step={step} tokens={tokens_seen/1e9:.2f}B best_val={best_val:.3f} "
+              f"-> {args.out}/final ({(time.time()-t0)/3600:.1f}h)", flush=True)
+
+    accelerator.end_training()   # clean NCCL shutdown
 
 
 if __name__ == "__main__":
