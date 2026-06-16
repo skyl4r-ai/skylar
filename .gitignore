@@ -82,3 +82,8 @@ skylar.egg-info
 *.pem
 *.key
 secrets.*
+
+# ══════════════════════════════════════════════════
+#  pip package — separate PyPI deliverable, NOT vendored in this framework repo
+# ══════════════════════════════════════════════════
+pip-skylar/
