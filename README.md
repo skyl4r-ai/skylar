@@ -23,6 +23,8 @@
 **by [A. Ivanovitch](https://github.com/mwspace) — CEO [MwSpace](https://mwspace.com) ·
 CTO [Sophia AI](https://2sophia.ai)**
 
+[🤗 Models](https://huggingface.co/collections/Sophia-AI/skylar) · [🌐 skyl4r.ai](https://skyl4r.ai)
+
 ---
 
 </div>
