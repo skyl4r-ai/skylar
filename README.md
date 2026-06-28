@@ -20,7 +20,7 @@
 
 *Built from first principles. No black boxes. Every layer, every rotation, every gradient — explicit.*
 
-**by [A. Ivanovitch](https://github.com/mwspace) — CEO [MwSpace](https://mwspace.com) ·
+**by [A. Ivanovitch](https://www.linkedin.com/in/aleksandr-ivanovitch-brunelli) — CEO [MwSpace](https://mwspace.com) ·
 CTO [Sophia AI](https://2sophia.ai)**
 
 [🤗 Models](https://huggingface.co/collections/Sophia-AI/skylar) · [🌐 skyl4r.ai](https://skyl4r.ai)
@@ -37,20 +37,21 @@ CTO [Sophia AI](https://2sophia.ai)**
 
 <sub>A from-scratch Skylar model completes a COBOL task → **GnuCOBOL compiles it** → it **runs** → correct output. No internet, no API, no third-party weights.</sub>
 
-<img src="docs/coboleval_benchmark.png" alt="COBOLEval — Skylar-390M-Cobol beats 7B code models on the same harness" width="780"/>
+<img src="docs/coboleval_benchmark.png" alt="COBOLEval — the from-scratch Skylar COBOL models (390M & 980M) beat the 7B code models on the same harness" width="820"/>
 
 </div>
 
-> **The COBOL specialist is live.** `pip install skylar` → `skylar cobol`. On **COBOLEval** (GnuCOBOL
-> compile + execute, same harness) it **beats Qwen2.5-Coder-7B, CodeLlama-7B and StarCoder2-7B** — at
-> **18× fewer parameters**. Model + full numbers: **[Sophia-AI/Skylar-390M-Cobol](https://huggingface.co/Sophia-AI/Skylar-390M-Cobol)**
-> *(research preview — a stub completer, not a chatbot; read the card).*
+> **The COBOL specialist is live.** `pip install skylar`. On **COBOLEval** (GnuCOBOL compile + execute,
+> same harness) the flagship **Skylar-980M-Cobol beats Qwen2.5-Coder-7B, CodeLlama-7B and StarCoder2-7B**
+> on both compile-rate and pass@1 — at **~7× fewer parameters**, fully local and **from scratch**. Model +
+> full numbers: **[Sophia-AI/Skylar-980M-Cobol](https://huggingface.co/Sophia-AI/Skylar-980M-Cobol)**
+> *(research preview — a COBOL-only specialist, not a general chatbot; read the card).*
 
 ```bash
 pip install skylar
 
-# the COBOL specialist (Skylar-390M-Cobol) — completes a COBOL stub into a compilable program
-skylar cobol --example
+# the COBOL specialist (Skylar-980M-Cobol) — writes, explains & modifies COBOL, 100% local
+skylar chat --model Sophia-AI/Skylar-980M-Cobol --system "Sei un esperto programmatore COBOL."
 
 # chat & semantic retrieval (Italian-legal, 236M)
 skylar chat  --model Sophia-AI/Skylar-236M-Chat
@@ -70,7 +71,7 @@ skylar embed --model Sophia-AI/Skylar-236M-Embed --query "prestito casa" --docs 
 
 ```bash
 # ── Clone & install ──────────────────────────────────────
-git clone https://github.com/mwspace/skylar.git && cd skylar
+git clone https://github.com/2sophia/skylar.git && cd skylar
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
 
@@ -262,7 +263,7 @@ python training/bin.pretrain.py \
 | Feature            | Detail                                                          |
 |:-------------------|:----------------------------------------------------------------|
 | 📦 **Data format** | Sharded uint32 `.bin` files (1GB each) with SHA256 checksums    |
-| ☁️ **Storage**     | Local disk or AWS S3 (shards cached locally, then loaded to RAM) |
+| ☁️ **Storage**     | Local disk or AWS S3 (shards cached locally, then memory-mapped) |
 | 📈 **Scheduler**   | WSD (Warmup-Stable-Decay) or cosine annealing                   |
 | 💾 **Checkpoints** | HuggingFace format + async S3 upload via `ThreadPoolExecutor`   |
 | 🔄 **Resume**      | Full state recovery (model, optimizer, scaler, step, best loss) |
@@ -306,6 +307,7 @@ skylar/
 │
 ├── 📦 data/                       # Data pipeline
 │   ├── bin.tokenizer.py           #   BPE tokenizer training + sharding
+│   ├── memmap_dataset.py          #   MemmapTokenDataset + Prefetcher (streaming loader)
 │   ├── bin.sft_data_to_jsonl.py   #   SFT data converter
 │   ├── bin.sft_data_shaffle.py    #   Shuffle utility
 │   ├── bin.sft_synthetic_data.py  #   Agentic synthetic data generator
@@ -320,6 +322,7 @@ skylar/
 │   ├── bin.pretrain.py            #   Pre-training (Stage 1)
 │   ├── bin.sft.py                 #   SFT (Stage 2)
 │   ├── bin.preference.py          #   Preference opt — ORPO/SimPO (Stage 3)
+│   ├── bin.distill.py             #   Knowledge distillation (online logit KD)
 │   └── bin.dpo.py                 #   DPO signpost → see bin.preference.py
 │
 ├── 📊 eval/                       # Evaluation & diagnostics
@@ -589,8 +592,8 @@ model.save_pretrained("my-skylar-model")
 # Load
 model = NanoTransformer.from_pretrained("my-skylar-model")
 
-# Push to Hub (planned)
-model.push_to_hub("username/skylar-medium")
+# Push to Hub (native, inherited from PreTrainedModel — the model family is live on the Hub)
+model.push_to_hub("Sophia-AI/skylar-medium")
 ```
 
 <br>
@@ -622,10 +625,12 @@ provider's CLI (e.g. `runpodctl`), and pull checkpoints back with `utils/bin.dow
 - [x] 🎯 Preference optimization — ORPO / SimPO (reference-free; supersedes DPO)
 - [x] 🧪 Public Italian benchmarks (XCOPA / HellaSwag / Belebele)
 - [x] 📊 Evaluation & diagnostic tools
-- [ ] 🌐 FastAPI/vLLM inference server
-- [ ] 📦 Push-to-Hub support
+- [x] 🌊 Streaming/memmap dataset — `MemmapTokenDataset` + prefetch (long-run pretrain trainer)
+- [x] 🧪 Knowledge distillation trainer — online logit KD (full + decoupled Top-K)
+- [x] ⌨️ COBOL code specialist — from-scratch, COBOLEval-validated ([Skylar-980M-Cobol](https://huggingface.co/Sophia-AI/Skylar-980M-Cobol))
+- [x] 📦 Push-to-Hub — native via `PreTrainedModel`; model family live on the Hub
+- [x] 🌐 OpenAI-compatible inference server — ships in the [`skylar`](https://pypi.org/project/skylar/) pip package
 - [ ] 🔭 Long-context: sliding-window attention + YaRN (for 8K+)
-- [ ] 🌊 Streaming/memmap dataset (required for 4B/8B scale)
 - [ ] 🎯 Classic DPO (optional; `bin.preference.py` covers the reference-free variants)
 
 <br>
@@ -696,7 +701,7 @@ attribution notices.
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Built with 🔥 by [Aleksandr Ivanovitch](https://github.com/mwspace) — CTO, [Sophia AI S.r.l.](https://2sophia.ai)**
+**Built with 🔥 by [Aleksandr Ivanovitch](https://www.linkedin.com/in/aleksandr-ivanovitch-brunelli) — CTO, [Sophia AI S.r.l.](https://2sophia.ai)**
 
 *Making frontier AI transparent, auditable, and reproducible.*
 
