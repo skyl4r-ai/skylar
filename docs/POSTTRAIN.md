@@ -57,7 +57,7 @@ sul vocab (per lo più zeri, peso solo sui termini rilevanti). Interpretabile (l
   --data .datasets/embed/contrastive_it.jsonl --epochs 3 --bf16 --batch_size 96 \
   --out_dir checkpoints_embed/skylar-mp-sparse
 ```
-- **dense + sparse dallo STESSO peso 236M** = stack hybrid stile BGE-M3, nativo in Qdrant (sophia-vector).
+- **dense + sparse dallo STESSO peso 236M** = stack hybrid stile BGE-M3, nativo in Qdrant.
 - Nota: lo smoke su modello test random non è sparso (L0 alto) — sparsità/semantica emergono col backbone pretrained + training pieno. Se early-instabile (CE esplode pre-sparsità), aggiungere un floor a `reg_scale` o scalare gli score.
 
 ## 3. Benchmark pubblici italiani (metrica pubblicabile)

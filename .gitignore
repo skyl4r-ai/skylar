@@ -87,3 +87,8 @@ secrets.*
 #  pip package — separate PyPI deliverable, NOT vendored in this framework repo
 # ══════════════════════════════════════════════════
 pip-skylar/
+
+# ══════════════════════════════════════════════════
+#  motor-generate — local agent workspace, NOT part of the repo
+# ══════════════════════════════════════════════════
+/motor-generate/

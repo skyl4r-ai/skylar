@@ -56,10 +56,20 @@ class PrefDS(Dataset):
         return self.rows[i]
 
 
+def prompt_msgs(ex):
+    """Support both the {prompt_messages:[...]} schema (e.g. build_dpo) and the legacy
+    {system, user} one. Legacy with a non-empty system reproduces the old behaviour exactly."""
+    if "prompt_messages" in ex:
+        return list(ex["prompt_messages"])
+    msgs = []
+    if ex.get("system"):
+        msgs.append({"role": "system", "content": ex["system"]})
+    msgs.append({"role": "user", "content": ex["user"]})
+    return msgs
+
+
 def build_seq(ex, key, tok, max_len):
-    msgs = [{"role": "system", "content": ex["system"]},
-            {"role": "user", "content": ex["user"]},
-            {"role": "assistant", "content": ex[key]}]
+    msgs = prompt_msgs(ex) + [{"role": "assistant", "content": ex[key]}]
     ids, labels = create_loss_mask(msgs, tok)
     ids, labels = ids[:max_len], labels[:max_len]
     return ids, labels
@@ -94,6 +104,32 @@ def mean_logp(model, ids, labels):
     return (logp * mask).sum(1) / mask.sum(1).clamp(min=1)
 
 
+@torch.no_grad()
+def eval_pref(model, val_rows, collate, dev, batch_size, amp):
+    """Held-out preference accuracy + margin. No backward. THE preference-tuning health signal:
+    if val pref_acc stalls/drops while train rises, the policy is overfitting/degenerating."""
+    if not val_rows:
+        return None
+    was_training = model.training
+    model.eval()
+    accs, margins = [], []
+    for i in range(0, len(val_rows), batch_size):
+        batch = val_rows[i:i + batch_size]
+        if not batch:
+            continue
+        (w_ids, w_lab), (l_ids, l_lab) = collate(batch)
+        w_ids, w_lab = w_ids.to(dev), w_lab.to(dev)
+        l_ids, l_lab = l_ids.to(dev), l_lab.to(dev)
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=amp):
+            lp_w = mean_logp(model, w_ids, w_lab)
+            lp_l = mean_logp(model, l_ids, l_lab)
+        accs.append((lp_w > lp_l).float().mean().item())
+        margins.append((lp_w - lp_l).mean().item())
+    if was_training:
+        model.train()
+    return sum(accs) / len(accs), sum(margins) / len(margins)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True)
@@ -114,6 +150,10 @@ def main():
     ap.add_argument("--bf16", action="store_true")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--vocab_size", type=int, default=32768)
+    # held-out preference val (opt-in, default OFF -> unchanged behaviour)
+    ap.add_argument("--val_frac", type=float, default=0.0, help="held-out fraction for val pref_acc/margin (0=off)")
+    ap.add_argument("--val_every", type=int, default=50, help="steps between val evaluations")
+    ap.add_argument("--grad_ckpt", action="store_true", help="gradient checkpointing (OOM fix: ORPO does 2 forwards)")
     args = ap.parse_args()
 
     dev = args.device
@@ -126,13 +166,23 @@ def main():
         model = NanoTransformer(get_config(args.preset, vocab_size=args.vocab_size))
         tok = Tokenizer.from_file(args.tokenizer)
     model = model.to(dev).train()
+    if args.grad_ckpt and hasattr(model, "gradient_checkpointing_enable"):
+        model.gradient_checkpointing_enable()   # ORPO does 2 forwards (chosen+rejected) -> OOM on full-FT without this
     pad_id = tok.token_to_id("<pad>")
     if pad_id is None:
         pad_id = 0
 
     ds = PrefDS(args.data)
+    collate_fn = make_collate(tok, args.max_len, pad_id)
+    val_rows = []
+    if args.val_frac > 0:
+        import random
+        random.Random(123).shuffle(ds.rows)
+        k = max(1, int(len(ds.rows) * args.val_frac))
+        val_rows, ds.rows = ds.rows[:k], ds.rows[k:]
+        print(f"val pairs held out: {len(val_rows)}")
     dl = DataLoader(ds, batch_size=args.batch_size, shuffle=True, drop_last=True,
-                    collate_fn=make_collate(tok, args.max_len, pad_id))
+                    collate_fn=collate_fn)
     total = args.max_steps or len(dl) * args.epochs
     print(f"params={sum(p.numel() for p in model.parameters())/1e6:.1f}M | pairs={len(ds)} | steps={total}")
 
@@ -172,6 +222,9 @@ def main():
                 margin = (lp_w - lp_l).mean().item()
                 acc = (lp_w > lp_l).float().mean().item()
                 print(f"step {step:5d}/{total} | loss {loss.item():.4f} | margin {margin:+.3f} | pref_acc {acc:.3f} | lr {lr_at(step):.2e}")
+            if val_rows and step > 0 and step % args.val_every == 0:
+                vacc, vmargin = eval_pref(model, val_rows, collate_fn, dev, args.batch_size, amp)
+                print(f"  [val] step {step} val_pref_acc {vacc:.3f} val_margin {vmargin:+.3f}")
             step += 1
             if step >= total:
                 done = True; break

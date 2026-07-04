@@ -1,6 +1,6 @@
 """
 =================================================================
-@copyright: A. Ivanovitch | CEO MwSpace | CTO of Sophia AI | 2026
+@copyright: A. Ivanovitch | CEO MwSpace | 2026
 =================================================================
 
 SkylarClassifier — BERT-style discriminative (non-generative) head on the

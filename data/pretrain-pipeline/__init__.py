@@ -1,3 +1,3 @@
 # =================================================================
-# @copyright: A. Ivanovitch | CEO MwSpace | CTO of Sophia AI | 2026
+# @copyright: A. Ivanovitch | CEO MwSpace | 2026
 # =================================================================

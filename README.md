@@ -20,8 +20,7 @@
 
 *Built from first principles. No black boxes. Every layer, every rotation, every gradient — explicit.*
 
-**by [A. Ivanovitch](https://www.linkedin.com/in/aleksandr-ivanovitch-brunelli) — CEO [MwSpace](https://mwspace.com) ·
-CTO [Sophia AI](https://2sophia.ai)**
+**by [A. Ivanovitch](https://www.linkedin.com/in/aleksandr-ivanovitch-brunelli) — CEO [MwSpace](https://mwspace.com)**
 
 [🤗 Models](https://huggingface.co/collections/Sophia-AI/skylar) · [🌐 skyl4r.ai](https://skyl4r.ai)
 
@@ -71,7 +70,7 @@ skylar embed --model Sophia-AI/Skylar-236M-Embed --query "prestito casa" --docs 
 
 ```bash
 # ── Clone & install ──────────────────────────────────────
-git clone https://github.com/2sophia/skylar.git && cd skylar
+git clone https://github.com/skyl4r-ai/skylar.git && cd skylar
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
 
@@ -677,8 +676,8 @@ provider's CLI (e.g. `runpodctl`), and pull checkpoints back with `utils/bin.dow
 Skylar is licensed under the **[Apache License 2.0](LICENSE)**.
 
 Copyright © 2026 **Aleksandr Ivanovitch**, who holds all intellectual property
-rights in this software in his capacity as **Chief Technology Officer (CTO)** of
-**Sophia AI S.r.l.** See the [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE) files
+rights in this software.
+See the [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE) files
 for the full terms and attribution.
 
 You are free to use, modify, and distribute this software under the terms of the
@@ -701,10 +700,10 @@ attribution notices.
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Built with 🔥 by [Aleksandr Ivanovitch](https://www.linkedin.com/in/aleksandr-ivanovitch-brunelli) — CTO, [Sophia AI S.r.l.](https://2sophia.ai)**
+**Built with 🔥 by [Aleksandr Ivanovitch](https://www.linkedin.com/in/aleksandr-ivanovitch-brunelli)**
 
 *Making frontier AI transparent, auditable, and reproducible.*
 
-<sub>Copyright © 2026 Aleksandr Ivanovitch — CTO, Sophia AI S.r.l. · Licensed under the Apache License 2.0.</sub>
+<sub>Copyright © 2026 Aleksandr Ivanovitch · Licensed under the Apache License 2.0.</sub>
 
 </div>

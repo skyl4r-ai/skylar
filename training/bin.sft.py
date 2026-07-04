@@ -80,6 +80,11 @@ if torch.cuda.is_available() and "B200" in torch.cuda.get_device_name(0):
 from torch.utils.data import Dataset, DataLoader
 from tokenizers import Tokenizer, decoders
 
+# make the repo root importable when run as a script without `pip install -e .` (like bin.pretrain.py)
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
+
 from models.decoder import NanoTransformer
 
 try:
@@ -248,13 +253,15 @@ class SFTDataset(Dataset):
       - SFT: loss ONLY on assistant responses (everything else is masked with -100)
     """
 
-    def __init__(self, examples, tokenizer, max_seq_len):
+    def __init__(self, examples, tokenizer, max_seq_len, overlong="tail_truncate"):
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
+        self.overlong = overlong
         self.samples = []
 
         skipped = 0
         truncated = 0
+        dropped_long = 0
         for ex in examples:
             # Token-based loss mask: tokenize each segment separately
             # for exact boundaries (no decode/re-encode approximation)
@@ -268,13 +275,18 @@ class SFTDataset(Dataset):
                 skipped += 1
                 continue
 
-            # Truncate to max length — keep the TAIL, not the head. Long examples
-            # must retain the final <|im_end|> label (the stop token); head
-            # truncation silently dropped it and trained the model to never stop.
+            # Over-length policy. Default 'tail_truncate' — keep the TAIL, not the head:
+            # long examples must retain the final <|im_end|> label (the stop token); head
+            # truncation silently dropped it and trained the model to never stop. 'drop'
+            # (audit H2) discards the example entirely instead — for datasets where a
+            # tail-truncated user turn would corrupt the instruction.
             if len(token_ids) > max_seq_len:
+                if overlong == "drop":
+                    dropped_long += 1
+                    continue
                 truncated += 1
-            token_ids = token_ids[-max_seq_len:]
-            labels = labels[-max_seq_len:]
+                token_ids = token_ids[-max_seq_len:]
+                labels = labels[-max_seq_len:]
 
             # Only keep examples where we have at least some assistant tokens
             if any(l != -100 for l in labels):
@@ -289,6 +301,8 @@ class SFTDataset(Dataset):
             console.print(f"  [yellow]⚠[/yellow] Skipped {skipped} examples (too short or no assistant content)")
         if truncated > 0:
             console.print(f"  [yellow]⚠[/yellow] Tail-truncated {truncated} examples longer than seq_len={max_seq_len} (kept the ending with <|im_end|>)")
+        if dropped_long > 0:
+            console.print(f"  [yellow]⚠[/yellow] Dropped {dropped_long} examples longer than seq_len={max_seq_len} (--overlong drop)")
 
     def __len__(self):
         return len(self.samples)
@@ -565,8 +579,8 @@ def train_sft(args):
     console.rule("[bold]Datasets[/bold]", style="dim")
     sft_seq_len = min(args.seq_len, config.max_seq_len)
     console.print(f"  Preparing SFT datasets... (seq_len=[bold]{sft_seq_len}[/bold], model_ctx={config.max_seq_len})")
-    train_ds = SFTDataset(train_examples, tokenizer, sft_seq_len)
-    val_ds = SFTDataset(val_examples, tokenizer, sft_seq_len)
+    train_ds = SFTDataset(train_examples, tokenizer, sft_seq_len, overlong=args.overlong)
+    val_ds = SFTDataset(val_examples, tokenizer, sft_seq_len)   # val: always tail-truncate (don't drop val examples)
 
     data_table = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
     data_table.add_column(style="bold")
@@ -605,6 +619,12 @@ def train_sft(args):
         if is_main:
             console.print(
                 f"  📊 Multi-epoch: [bold]{args.epochs}[/bold] epochs × {steps_per_epoch} steps/epoch = [bold]{args.max_steps}[/bold] steps")
+
+    # warmup as a fraction of the finalized max_steps (overrides --warmup_steps when set)
+    if args.warmup_frac is not None:
+        args.warmup_steps = max(1, int(args.max_steps * args.warmup_frac))
+        if is_main:
+            console.print(f"  Warmup: [bold]{args.warmup_frac:.1%}[/bold] of {args.max_steps} = [bold]{args.warmup_steps}[/bold] steps")
 
     # ── Optimizer ──
     # µP: per-parameter LR scaling when base model was trained with µP
@@ -898,7 +918,7 @@ def train_sft(args):
 
                     token_ids = encode_chatml([
                         {"role": "system", "content": "You are a helpful assistant."},
-                        {"role": "user", "content": "Cosa è la normativa bancaria italiana?"},
+                        {"role": "user", "content": args.sample_prompt},
                     ], tokenizer, add_generation_prompt=True)
                     input_ids_gen = torch.tensor([token_ids], device=device)
 
@@ -987,6 +1007,12 @@ def main():
                              "arxiv:2602.11149: multi-epoch on small dataset beats single-epoch on large.")
     parser.add_argument("--lr", type=float, default=2e-5)  # Lower LR for fine-tuning
     parser.add_argument("--warmup_steps", type=int, default=100)
+    parser.add_argument("--warmup_frac", type=float, default=None,
+                        help="warmup as a fraction of max_steps (overrides --warmup_steps when set)")
+    parser.add_argument("--overlong", default="tail_truncate", choices=["tail_truncate", "drop"],
+                        help="over-length examples: tail_truncate (keep the ending w/ <|im_end|>) or drop them")
+    parser.add_argument("--sample_prompt", type=str, default="Cosa è la normativa bancaria italiana?",
+                        help="user prompt used for the periodic in-training sample generation")
     parser.add_argument("--weight_decay", type=float, default=0.1)
     parser.add_argument("--grad_clip", type=float, default=1.0)
 

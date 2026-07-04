@@ -66,7 +66,20 @@ def lr_wsd(step, warmup, total, base, min_ratio, decay_ratio=0.1):
     return min_lr + (base - min_lr) * (1.0 - (step - stable_end) / decay_steps)
 
 
+def lr_constant(step, warmup, base):
+    """WSM (2507.17634): warmup lineare 0->peak, poi LR COSTANTE per sempre. NESSUN decay online.
+    Il 'decay' e' emulato POST-HOC dal merge degli ultimi N checkpoint (bin.merge_wsm.py) — il che
+    e' algebricamente un LR-decay sui gradienti di quella finestra (Teorema 3.1 del paper). Sul burst
+    COBOL a LR costante i token di nicchia entrano con PESO PIENO (nel cosine il LR e' gia' schiacciato
+    a fine run e il COBOL 'non si imprime'). Vedi projects/skylar-cobol/SCHEDULER_LR_4B.md."""
+    if step < warmup:
+        return base * (step + 1) / max(1, warmup)
+    return base
+
+
 def lr_at(step, warmup, total, base, min_ratio=0.1, schedule="cosine", decay_ratio=0.1):
+    if schedule == "constant":
+        return lr_constant(step, warmup, base)
     if schedule == "wsd":
         return lr_wsd(step, warmup, total, base, min_ratio, decay_ratio)
     return lr_cosine(step, warmup, total, base, min_ratio)
@@ -211,6 +224,29 @@ def save_ckpt(path, raw_model, opt, step, tokens_seen, args, best_val, ds=None, 
         async_upload_checkpoint(s3, str(path), path.name)
 
 
+def save_weights_only(path, raw_model, meta=None, tokenizer_path=None, s3=None):
+    """WSM snapshot: SOLO pesi (save_pretrained + config), NIENTE training_state.pt.
+    Per un 4B: ~8GB bf16 vs ~30GB con l'opt state -> permette 8-10 snapshot nella merge-window
+    senza esplodere il disco. Scrive wsm_snapshot.json {step, tokens} cosi' bin.merge_wsm.py
+    puo' selezionare la finestra per token. Atomico (tmp -> os.replace). NON e' un resume-point."""
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True, exist_ok=True)
+    raw_model.save_pretrained(str(tmp))
+    if meta is not None:
+        (tmp / "wsm_snapshot.json").write_text(json.dumps(meta))
+    if tokenizer_path:
+        try:
+            Tokenizer.from_file(tokenizer_path).save(str(tmp / "tokenizer.json"))
+        except Exception:
+            pass
+    shutil.rmtree(path, ignore_errors=True)
+    os.replace(tmp, path)
+    if s3 is not None:
+        async_upload_checkpoint(s3, str(path), f"wsm/{path.name}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--preset", default="test")
@@ -227,11 +263,14 @@ def main():
     ap.add_argument("--warmup", type=int, default=2000)
     ap.add_argument("--min_lr_ratio", type=float, default=0.1)
     ap.add_argument("--wd", type=float, default=0.1)
-    ap.add_argument("--lr_schedule", default="cosine", choices=["cosine", "wsd"])
+    ap.add_argument("--lr_schedule", default="cosine", choices=["cosine", "wsd", "constant"])
     ap.add_argument("--lr_decay_ratio", type=float, default=0.1, help="WSD: last-fraction decay")
     ap.add_argument("--eval_every", type=int, default=1000)
     ap.add_argument("--ckpt_every", type=int, default=2000)
     ap.add_argument("--milestones", default="", help="comma token marks -> step_tok<N>B snapshots")
+    ap.add_argument("--wsm_every_tok", type=float, default=0.0,
+                    help="WSM: every N tokens save a WEIGHTS-ONLY snapshot to <out>/wsm/ (merge candidates). "
+                         "0=off. Use ~2e9 during the constant-LR burst -> >=8-10 ckpt in the merge-window.")
     ap.add_argument("--grad_ckpt", action="store_true")
     ap.add_argument("--no_prefetch", action="store_true")
     ap.add_argument("--compile", action="store_true")
@@ -392,6 +431,8 @@ def main():
         return accelerator.gather(t).mean().item()
 
     done_ms = {m for m in milestones if (Path(args.out) / f"step_tok{int(m/1e9)}B").exists()}
+    wsm_step = int(args.wsm_every_tok) if args.wsm_every_tok and args.wsm_every_tok > 0 else 0
+    next_wsm = ((tokens_seen // wsm_step) + 1) * wsm_step if wsm_step else 0   # resume-safe: next multiple ahead
     step = start_step - 1
     model.train(); t0 = time.time(); seen0 = tokens_seen; train_secs = 0.0
     train_pf = None if args.no_prefetch else Prefetcher(ds, "train", args.batch_size, device,
@@ -455,6 +496,18 @@ def main():
                     if is_main:
                         save_ckpt(Path(args.out) / f"step_tok{int(m/1e9)}B", raw_model, opt, step, tokens_seen, args, best_val, ds, train_pf, s3)
                         print(f"  [milestone] snapshot @ {m/1e9:.0f}B tokens (step {step})", flush=True)
+
+            # WSM: weights-only snapshots (merge candidates) — every rank steps next_wsm/barrier symmetrically
+            if wsm_step and tokens_seen >= next_wsm:
+                while next_wsm <= tokens_seen:
+                    next_wsm += wsm_step
+                accelerator.wait_for_everyone()
+                if is_main:
+                    tb = tokens_seen / 1e9
+                    save_weights_only(Path(args.out) / "wsm" / f"snap_step{step:08d}_tok{tb:.2f}B",
+                                      raw_model, meta={"step": step, "tokens": tokens_seen},
+                                      tokenizer_path=args.tokenizer, s3=s3)
+                    print(f"  [wsm] weights-only snapshot @ {tb:.2f}B tokens (step {step})", flush=True)
 
             if (step - start_step) > 0 and step % args.ckpt_every == 0:
                 accelerator.wait_for_everyone()

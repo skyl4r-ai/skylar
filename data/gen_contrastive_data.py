@@ -5,7 +5,7 @@ The embedder is trained with InfoNCE / in-batch negatives: each (query, positive
 pair is pulled together, every OTHER positive in the batch is a negative. So we
 only need (query, positive) pairs here — negatives come for free from the batch.
 
-Domain: Italian banking / legal (sophia-vector RAG). Definitions are real so the
+Domain: Italian banking / legal (production RAG). Definitions are real so the
 embedder learns true domain semantics. Query paraphrases give surface variety so
 the model learns meaning, not lexical overlap.
 

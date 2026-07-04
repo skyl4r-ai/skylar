@@ -1,6 +1,6 @@
 """
 =================================================================
-@copyright: A. Ivanovitch | CEO MwSpace | CTO of Sophia AI | 2026
+@copyright: A. Ivanovitch | CEO MwSpace | 2026
 =================================================================
 
 Rotary Positional Embedding (RoPE) — used in LLaMA, Mistral, etc.

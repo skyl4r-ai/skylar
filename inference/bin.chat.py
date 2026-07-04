@@ -115,7 +115,7 @@ def print_header(model_name, n_params, device, system_prompt, settings):
     console.print()
     console.print(Panel(
         info_table,
-        title="[bold bright_cyan]◆ Skylar Chat[/bold bright_cyan] [dim]— Sophia AI NanoTransformer[/dim]",
+        title="[bold bright_cyan]◆ Skylar Chat[/bold bright_cyan] [dim]— Skylar NanoTransformer[/dim]",
         border_style="cyan",
         width=min(console.width, 80),
         padding=(1, 2),
@@ -178,7 +178,7 @@ def print_config(temperature, top_k, top_p, rep_penalty, max_tokens, system_prom
 # ─────────────────────────────────────────────────────────────
 
 SYSTEM_DEFAULT = (
-    "Sei Skylar di Sophia AI, un assistente conversazionale in italiano. "
+    "Sei Skylar, un assistente conversazionale in italiano. "
     "Parla in modo naturale e utile."
 )
 

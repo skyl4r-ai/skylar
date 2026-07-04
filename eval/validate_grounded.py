@@ -1,7 +1,7 @@
 """
 Grounded / format-task validation — the SFT model's REAL intended role.
 
-A 101M model can't be a factual oracle, but the prod use (sophia-vector RAG) is
+A 101M model can't be a factual oracle, but the prod use (a production RAG) is
 grounded: answer-from-context, classify, extract-to-JSON, query-gen. Those need
 fluency + instruction-following + format discipline, not parametric knowledge.
 This probes exactly that, at low temperature for task reliability.
