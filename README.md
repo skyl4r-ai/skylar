@@ -1,15 +1,23 @@
 <div align="center">
 
-```
- ███████╗██╗  ██╗██╗   ██╗██╗      █████╗ ██████╗
- ██╔════╝██║ ██╔╝╚██╗ ██╔╝██║     ██╔══██╗██╔══██╗
- ███████╗█████╔╝  ╚████╔╝ ██║     ███████║██████╔╝
- ╚════██║██╔═██╗   ╚██╔╝  ██║     ██╔══██║██╔══██╗
- ███████║██║  ██╗   ██║   ███████╗██║  ██║██║  ██║
- ╚══════╝╚═╝  ╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/skylar-logo-dark-2048.png">
+  <img alt="SKYL4R" src="docs/brand/skylar-logo-light-2048.png" width="460">
+</picture>
 
-### 🧠 A from-scratch LLM training framework — 6M to 128B parameters, one codebase.
+### 🧠 The Skylar Framework — a from-scratch LLM training stack, 6M to 128B parameters, one codebase.
+
+```
+╭─ skyl4r ───────────────────────────────────────────────────────╮
+│                                                                 │
+│  A from-scratch LLM training framework · 6M → 128B params       │
+│  Every layer, every rotation, every gradient — written by hand. │
+│                                                                 │
+│  RMSNorm · RoPE · GQA · QK-Norm · SwiGLU · FlexAttention · µP   │
+│  pretrain → SFT → preference / GRPO / RFT → merge → eval        │
+│                                                                 │
+╰─────────────────────────────────────────────────────────────────╯
+```
 
 [![Python](https://img.shields.io/badge/python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.1+-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)](https://pytorch.org)
