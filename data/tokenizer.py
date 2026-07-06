@@ -65,21 +65,58 @@ def train(vocab_size, docs, save_path, *, digits_split=True, max_token_length=64
     return tok
 
 
+def verify_roundtrip(tok, docs_sample, *, limit=256):
+    """Hard lossless check: decode(encode(x)) == x byte-for-byte over up to `limit` docs.
+    Returns {n, ok, fail, rate, mismatches:[(idx, first_diff_char)]}. This is the check the
+    inline build_mix/build_tokenizer round-trip only *printed* (and only on the first ~30
+    chars) — here it's exact and reusable, so a caller can assert on it."""
+    n = ok = 0
+    mism = []
+    for i, d in enumerate(docs_sample):
+        if i >= limit:
+            break
+        n += 1
+        # skip_special_tokens=False: gli special-token (ChatML/think/tool) sono CONTENUTO
+        # del documento nel pretrain -> devono sopravvivere al round-trip, non sparire.
+        rt = tok.decode(tok.encode(d, add_special_tokens=False).ids, skip_special_tokens=False)
+        if rt == d:
+            ok += 1
+        elif len(mism) < 5:
+            j = next((k for k in range(min(len(rt), len(d))) if rt[k] != d[k]), min(len(rt), len(d)))
+            mism.append((i, j))
+    return {"n": n, "ok": ok, "fail": n - ok, "rate": round(ok / max(n, 1), 4), "mismatches": mism}
+
+
 def tokenize_to_shards(tok, docs, out_dir, shard_tokens=8_000_000, start_idx=0,
-                       enc_batch=4000, *, dtype="uint16"):
+                       enc_batch=4000, *, dtype="uint16", verify_sample=0):
     """Write <bos>+ids+<eos> per doc into little-endian shards of the chosen dtype
     (uint16|uint32), indices from start_idx. Uses tok.encode_batch (Rust, multi-threaded)
     — ~Ncores faster than per-doc encode, which matters at the ~8B-token mix scale.
     Returns (records, total_tokens, n_docs). NOTE: sets tok.post_processor = None (bos/eos
-    added manually here) — retrain/reload the tokenizer if you need the processor after."""
+    added manually here) — retrain/reload the tokenizer if you need the processor after.
+
+    Correctness guards (default off to keep the generic path byte-identical):
+      - dtype uint16 requires vocab <= 65536, else ids would be silently truncated -> raise;
+      - verify_sample>0 runs verify_roundtrip on the first N docs and raises if not lossless."""
     if dtype not in _DTYPE:
         raise ValueError(f"dtype must be one of {list(_DTYPE)}, got {dtype!r}")
+    if dtype == "uint16" and tok.get_vocab_size() > 65536:
+        raise ValueError(f"vocab {tok.get_vocab_size()} > 65536 does not fit uint16 "
+                         f"(ids would be truncated) — use dtype='uint32'")
     np_dtype = _DTYPE[dtype]
     out_dir = Path(out_dir)
     shards_dir = out_dir / "shards"
     shards_dir.mkdir(parents=True, exist_ok=True)
     bos, eos = tok.token_to_id("<bos>"), tok.token_to_id("<eos>")
     tok.post_processor = None  # we add bos/eos manually
+    if verify_sample > 0:  # peek the first N docs, assert lossless, then chain them back
+        import itertools
+        head = list(itertools.islice(docs, verify_sample))
+        vr = verify_roundtrip(tok, head, limit=verify_sample)
+        if vr["fail"]:
+            raise ValueError(f"round-trip NOT lossless: {vr['fail']}/{vr['n']} docs "
+                             f"(rate {vr['rate']}), first mismatches {vr['mismatches']}")
+        docs = itertools.chain(head, docs)
     records, buf, total, idx, n_docs = [], [], 0, start_idx, 0
 
     def flush():
