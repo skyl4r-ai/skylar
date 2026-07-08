@@ -51,18 +51,18 @@
 > **The COBOL specialist is live.** `pip install skylar`. On **COBOLEval** (GnuCOBOL compile + execute,
 > same harness) the flagship **Skylar-980M-Cobol beats Qwen2.5-Coder-7B, CodeLlama-7B and StarCoder2-7B**
 > on both compile-rate and pass@1 — at **~7× fewer parameters**, fully local and **from scratch**. Model +
-> full numbers: **[Sophia-AI/Skylar-980M-Cobol](https://huggingface.co/Sophia-AI/Skylar-980M-Cobol)**
+> full numbers: **[Skyl4r-Ai/Skylar-980M-Cobol](https://huggingface.co/Skyl4r-Ai/Skylar-980M-Cobol)**
 > *(research preview — a COBOL-only specialist, not a general chatbot; read the card).*
 
 ```bash
 pip install skylar
 
 # the COBOL specialist (Skylar-980M-Cobol) — writes, explains & modifies COBOL, 100% local
-skylar chat --model Sophia-AI/Skylar-980M-Cobol --system "Sei un esperto programmatore COBOL."
+skylar chat --model Skyl4r-Ai/Skylar-980M-Cobol --system "Sei un esperto programmatore COBOL."
 
 # chat & semantic retrieval (Italian-legal, 236M)
-skylar chat  --model Sophia-AI/Skylar-236M-Chat
-skylar embed --model Sophia-AI/Skylar-236M-Embed --query "prestito casa" --docs "mutuo" "meteo"
+skylar chat  --model Skyl4r-Ai/Skylar-236M-Chat
+skylar embed --model Skyl4r-Ai/Skylar-236M-Embed --query "prestito casa" --docs "mutuo" "meteo"
 ```
 
 <br>
@@ -634,7 +634,7 @@ provider's CLI (e.g. `runpodctl`), and pull checkpoints back with `utils/bin.dow
 - [x] 📊 Evaluation & diagnostic tools
 - [x] 🌊 Streaming/memmap dataset — `MemmapTokenDataset` + prefetch (long-run pretrain trainer)
 - [x] 🧪 Knowledge distillation trainer — online logit KD (full + decoupled Top-K)
-- [x] ⌨️ COBOL code specialist — from-scratch, COBOLEval-validated ([Skylar-980M-Cobol](https://huggingface.co/Sophia-AI/Skylar-980M-Cobol))
+- [x] ⌨️ COBOL code specialist — from-scratch, COBOLEval-validated ([Skylar-980M-Cobol](https://huggingface.co/Skyl4r-Ai/Skylar-980M-Cobol))
 - [x] 📦 Push-to-Hub — native via `PreTrainedModel`; model family live on the Hub
 - [x] 🌐 OpenAI-compatible inference server — ships in the [`skylar`](https://pypi.org/project/skylar/) pip package
 - [ ] 🔭 Long-context: sliding-window attention + YaRN (for 8K+)
