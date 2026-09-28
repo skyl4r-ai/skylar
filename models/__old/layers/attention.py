@@ -38,22 +38,6 @@ except ImportError:
                 "Falling back to dense mask for packing.")
 
 
-# flex_attention must be compiled ON ITS OWN to get the fused kernel. Compiling the whole model is not
-# enough: KDA's Triton kernels and gradient checkpointing break the graph, and outside a compiled region
-# flex_attention silently falls back to a reference implementation that materialises the full T×T score
-# matrix (at seq 8192 on the 990M: OOM on 24 GB, and far slower everywhere). Compiled lazily, CUDA only.
-_flex_compiled = None
-
-
-def _flex(q, k, v, **kw):
-    global _flex_compiled
-    if not q.is_cuda:
-        return flex_attention(q, k, v, **kw)
-    if _flex_compiled is None:
-        _flex_compiled = torch.compile(flex_attention, dynamic=False)
-    return _flex_compiled(q, k, v, **kw)
-
-
 # ─────────────────────────────────────────────────────────────
 # DOCUMENT MASKING (for packed sequence training)
 # ─────────────────────────────────────────────────────────────
@@ -89,43 +73,6 @@ def create_document_block_mask(document_ids, n_heads, device=None):
         return causal & same_doc
 
     return create_block_mask(mask_mod, B=B, H=None, Q_LEN=T, KV_LEN=T, device=device)
-
-
-def build_cu_seqlens(document_ids):
-    """
-    Confini dei documenti in forma cumulativa, per i layer ricorrenti.
-
-    Un layer di attention riceve una *maschera*: gli si dice quali coppie di token
-    non devono vedersi. Un layer ricorrente non ha coppie — ha uno stato che scorre.
-    L'unico modo di separare due documenti è dirgli DOVE azzerarlo, e questo è il
-    formato che i kernel di `fla` (e di flash-attn) si aspettano: gli offset di
-    inizio di ogni segmento nella sequenza appiattita.
-
-        document_ids  [[0,0,0,1,1], [0,0,1,1,1]]   (B=2, T=5)
-        →             [0, 3, 5, 7, 10]
-
-    Senza questo, in un batch impacchettato lo stato ricorrente porta il contesto di
-    un programma COBOL dentro il successivo. Non è un crash: è un modello peggiore.
-
-    Args:
-        document_ids: (B, T) interi — a quale documento appartiene ogni token
-    Returns:
-        (n_segmenti + 1,) int32 su device, monotona crescente, che parte da 0
-    """
-    B, T = document_ids.shape
-    bounds = [0]
-    offset = 0
-    # I confini si calcolano sugli indici, non sui valori: due documenti diversi
-    # possono avere lo stesso id in righe diverse del batch, e ogni riga è comunque
-    # una sequenza a sé (lo stato non attraversa le righe).
-    changes = (document_ids[:, 1:] != document_ids[:, :-1])
-    for b in range(B):
-        idx = torch.nonzero(changes[b], as_tuple=False).flatten() + 1
-        for i in idx.tolist():
-            bounds.append(offset + i)
-        offset += T
-        bounds.append(offset)
-    return torch.tensor(bounds, dtype=torch.int32, device=document_ids.device)
 
 
 def make_packing_mask(document_ids, dtype=torch.bfloat16):
@@ -203,39 +150,7 @@ class CausalSelfAttention(nn.Module):
 
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
-
-        # ── v2: NoPE (docs/ARCH_V2.md §1, punto 6) ──
-        # In un ibrido con KDA la posizione arriva dalla ricorrenza dei layer
-        # ricorrenti, quindi i layer full-attention possono farne a meno: è ciò che
-        # dà a K3 l'extrapolazione oltre la finestra addestrata senza YaRN.
-        # ⚠️ Se KDA non fornisse abbastanza segnale posizionale, il danno NON si vede
-        # dalla loss — solo dal gate G8 (retrieval a 8k/16k/32k), a run finito.
-        # Con NoPE la cache RoPE non viene nemmeno allocata (33 MB/layer a 32K ctx).
-        self.use_rope = not getattr(config, "nope_on_attention", False)
-        self.rope = (RotaryEmbedding(self.d_head, config.max_seq_len, base=config.rope_theta)
-                     if self.use_rope else None)
-
-        # ── v2: output gate full-rank (docs/ARCH_V2.md §1, punto 4) ──
-        #   y = W_o[ σ(W_gate·x) ⊙ RMSNorm(attn_out) ]
-        # Il gate si calcola dall'INPUT del layer, non dall'uscita dell'attention:
-        # così la sua decisione non dipende da quanto l'attention ha già prodotto, ed
-        # è il meccanismo che rimuove l'attention sink (le teste che scaricano
-        # probabilità sul primo token per non attendere a nulla).
-        # NOME: deliberatamente NON `*.W_o.weight` né `*.w2.weight`, i due pattern su
-        # cui decoder.py fa l'init depth-scaled — un gate scalato in profondità non
-        # avrebbe senso. Vedi la trappola #1 in docs/ARCH_V2.md §6.
-        # Due forme, e la differenza di costo e' 128x:
-        #   "fullrank" → un valore per CANALE d'uscita: Linear(d, H·d_head)
-        #   "perhead"  → un valore per TESTA:          Linear(d, H)
-        # arXiv 2505.06708 valida il "head-specific sigmoid gate" ma l'abstract non
-        # fissa quale delle due (testano 30 varianti). K3 usa la piena. Misuriamo.
-        g = getattr(config, "attn_out_gate", False)
-        self.gate_mode = ("fullrank" if g is True else (g or None)) if g else None
-        self.out_gate = self.gate_mode is not None
-        if self.out_gate:
-            gate_dim = self.d_attn if self.gate_mode == "fullrank" else self.n_heads
-            self.W_gate = nn.Linear(config.d_model, gate_dim, bias=config.bias)
-            self.o_norm = RMSNorm(self.d_head)
+        self.rope = RotaryEmbedding(self.d_head, config.max_seq_len, base=config.rope_theta)
 
         # µP: scale attention logits by 1/d_head instead of 1/√d_head
         # This keeps attention entropy stable as width grows.
@@ -273,14 +188,13 @@ class CausalSelfAttention(nn.Module):
 
         if kv_cache is not None:
             k_prev, v_prev = kv_cache
-            if self.use_rope:
-                offset = k_prev.shape[2]
-                cos, sin = self.rope(offset + T)
-                cos, sin = cos[offset:offset + T], sin[offset:offset + T]
-                q, k = apply_rotary_emb(q, k, cos, sin)
+            offset = k_prev.shape[2]
+            cos, sin = self.rope(offset + T)
+            cos, sin = cos[offset:offset + T], sin[offset:offset + T]
+            q, k = apply_rotary_emb(q, k, cos, sin)
             k = torch.cat([k_prev, k], dim=2)
             v = torch.cat([v_prev, v], dim=2)
-        elif self.use_rope:
+        else:
             cos, sin = self.rope(T)
             q, k = apply_rotary_emb(q, k, cos, sin)
 
@@ -305,7 +219,7 @@ class CausalSelfAttention(nn.Module):
 
             # PATH 1: FlexAttention with document masking
             # GQA handled natively — no need to expand K/V
-            attn_out = _flex(
+            attn_out = flex_attention(
                 q, k, v,
                 block_mask=block_mask,
                 enable_gqa=self.use_gqa,
@@ -336,16 +250,5 @@ class CausalSelfAttention(nn.Module):
                 scale=self.attn_scale,
             )
 
-        if self.out_gate:
-            # RMSNorm per-testa sull'uscita (attn_out è ancora (B, H, T, d_head)),
-            # poi il gate calcolato dall'input. Ordine come K3: normalizza, poi filtra.
-            attn_out = self.o_norm(attn_out)
-            gate = torch.sigmoid(self.W_gate(x))
-            if self.gate_mode == "perhead":
-                # (B, T, H) → un fattore per testa, ripetuto sui suoi d_head canali
-                gate = gate.unsqueeze(-1).expand(B, T, self.n_heads, self.d_head).reshape(B, T, self.d_attn)
-            attn_out = attn_out.transpose(1, 2).contiguous().view(B, T, self.d_attn)
-            attn_out = attn_out * gate
-        else:
-            attn_out = attn_out.transpose(1, 2).contiguous().view(B, T, self.d_attn)
+        attn_out = attn_out.transpose(1, 2).contiguous().view(B, T, self.d_attn)
         return self.resid_dropout(self.W_o(attn_out)), new_cache

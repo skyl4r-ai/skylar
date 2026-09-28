@@ -43,21 +43,6 @@ class NanoTransformerConfig(PretrainedConfig):
             eos_token_id=2,
             # µP: set to proxy model width to enable HP transfer
             mup_base_d_model=None,
-            # ── v2 (docs/ARCH_V2.md) — ogni default riproduce il comportamento v1 ──
-            hidden_act="swiglu",
-            situ_beta1=4.0,
-            situ_beta2=25.0,
-            attn_out_gate=False,   # False | "perhead" (consigliato) | "fullrank"
-            attn_res=False,
-            attn_res_block=6,
-            layer_types=None,
-            kda_ratio=None,
-            kda_heads=None,
-            kda_gate="lowrank",
-            kda_conv_size=4,
-            nope_on_attention=False,
-            mtp_layers=0,
-            mtp_loss_weight=0.3,
             **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -91,83 +76,12 @@ class NanoTransformerConfig(PretrainedConfig):
         self.qk_norm = qk_norm
         self.rope_theta = rope_theta
         self.mup_base_d_model = mup_base_d_model
-
-        # ── v2 ─────────────────────────────────────────────────────────────
-        # Piano completo, numeri verificati e fonti: docs/ARCH_V2.md.
-        # Invariante: con questi default il modello è BIT-IDENTICO alla v1
-        # (gate G3), così i checkpoint pubblicati si caricano senza toccare
-        # il loro config.json — che non contiene nessuno di questi campi.
-        self.hidden_act = hidden_act              # "swiglu" (v1) | "situ_glu"
-        self.situ_beta1 = situ_beta1              # K3 usa 4.0/25.0, tarati sul LORO
-        self.situ_beta2 = situ_beta2              # regime (hidden 7168) → da ri-tarare
-        # Gate d'uscita prima di W_o. Due forme, 127x di differenza in parametri:
-        #   "perhead"  Linear(d, H)          → +18.560 sul 990M
-        #   "fullrank" Linear(d, H·d_head)   → +2.359.424
-        # Misurate su 5 seed: INDISTINGUIBILI (t=0.61, 4 gdl, il segno cambia fra
-        # seed). A parita' si prende quella che costa 127x meno — vedi PAPER_V2 §8.4.
-        self.attn_out_gate = attn_out_gate
-        self.attn_res = attn_res                  # attenzione softmax sulla profondità
-        self.attn_res_block = attn_res_block      # S: la forma piena costa 6.94 GiB di
-                                                  # attivazioni vive, S=4-6 ne costa 1.3-1.9
-        self.kda_gate = kda_gate                  # "lowrank" (tiene le teste) | "fullrank"
-        self.kda_conv_size = kda_conv_size
-        self.nope_on_attention = nope_on_attention
-        self.mtp_layers = mtp_layers
-        self.mtp_loss_weight = mtp_loss_weight
-
-        # KDA: nessun GQA, quindi q/k/v/o sono tutte d × (H_kda·d_head). Copiare il
-        # conteggio di teste di Kimi gonfia il modello; il default lo DIMENSIONA a
-        # parità con l'attention che sostituisce → H_kda = (n_heads + n_kv_heads)/2.
-        # Su tutti e tre i preset della linea esce intero (8, 10, 20).
-        self.kda_ratio = kda_ratio
-        if kda_heads is not None:
-            self.kda_heads = kda_heads
-        else:
-            h = (n_heads + self.n_kv_heads) / 2
-            self.kda_heads = int(h) if h == int(h) else None
-
-        # `layer_types` è la fonte di verità di quale layer è cosa. Se è None ma
-        # kda_ratio è dato, si deriva; se entrambi sono None il modello è tutto
-        # attention, cioè la v1.
-        self.layer_types = layer_types or self._resolve_layer_types(kda_ratio, n_layers)
-
         super().__init__(
             pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,
             eos_token_id=eos_token_id,
             **kwargs,
         )
-
-    @staticmethod
-    def _resolve_layer_types(kda_ratio, n_layers):
-        """
-        Espande "3:1" nella lista per-layer, es. per 36 layer:
-            [kda, kda, kda, attention] × 9  →  27 ricorrenti, 9 full-attention.
-
-        L'ultimo layer del gruppo è quello full-attention (come Kimi Linear): la
-        sequenza parte ricorrente e "richiama" con l'attenzione esatta a chiudere
-        ogni blocco. Con `kda_ratio=None` torna tutto attention, cioè la v1.
-        """
-        if not kda_ratio:
-            return ["attention"] * n_layers
-        try:
-            n_kda, n_attn = (int(x) for x in str(kda_ratio).split(":"))
-        except ValueError:
-            raise ValueError(f"kda_ratio va scritto come 'N:M' (es. '3:1'), non {kda_ratio!r}")
-        if n_kda < 0 or n_attn < 1:
-            raise ValueError(f"kda_ratio {kda_ratio!r}: serve almeno un layer full-attention "
-                             f"per gruppo, o il modello non ha richiamo esatto")
-        period = n_kda + n_attn
-        types = ["kda" if (i % period) < n_kda else "attention" for i in range(n_layers)]
-        if types[-1] != "attention":
-            # Un modello che chiude su un layer ricorrente perde il richiamo esatto
-            # proprio dove serve (l'ultimo hidden state va al lm_head).
-            types[-1] = "attention"
-        return types
-
-    @property
-    def n_kda_layers(self):
-        return sum(1 for t in self.layer_types if t == "kda")
 
     @property
     def d_head(self):
@@ -305,21 +219,6 @@ PRESETS = {
     "1B_D": dict(
         d_model=1536, n_heads=12, n_kv_heads=4, d_head=128, n_layers=36, d_ff=4096,
         max_seq_len=16384, rope_theta=1000000.0,
-    ),
-
-    # ─── 2B — lo scalino intermedio della linea v2 ─────────
-    # ~2.09B params (vocab 64000) baseline / ~2.22B con l'architettura v2 | ctx 32K.
-    # Non replica un Qwen3: è il gradino fra 1B_D e 4b per validare che la pipeline
-    # scali senza sorprese prima di spendere il 4B (docs/ARCH_V2.md §3).
-    # Vincoli rispettati: d_head=128 come tutta la famiglia da gold in su;
-    # H·d_head = d_model → Wq quadrata (come 1B_D); GQA 4:1 (fra il 3:1 del 1B_D e
-    # il 4:1 del 4b); d_ff/d_model = 3.50, monotono fra 2.67 (1B_D) e 3.80 (4b);
-    # aspect ratio L/d = 17.6, in mezzo fra 23.4 e 14.1; d_ff = 7168 = 56·128.
-    # H_kda derivato = (16+4)/2 = 10, intero.
-    # Budget: 300B token come tutti gli altri | peak LR 9.7e-5 (formula 2601.05049).
-    "2b": dict(
-        d_model=2048, n_heads=16, n_kv_heads=4, d_head=128, n_layers=36, d_ff=7168,
-        max_seq_len=32768, rope_theta=1000000.0,
     ),
 
     # ─── 4B — Qwen3-4B ─────────────────────────────────────

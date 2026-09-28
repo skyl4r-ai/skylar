@@ -21,12 +21,60 @@ Usage:
     x, y = pf.next()
 """
 import json
+import os
+import threading
+from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
 
 # meta["dtype"] string -> little-endian numpy dtype
 _DTYPE_MAP = {"uint16": "<u2", "uint32": "<u4"}
+
+# How many shards may stay mapped at once. Each live np.memmap costs one file descriptor for
+# its whole lifetime (CPython dups the fd inside mmap), so mapping every shard up front dies
+# with OSError 24 once a corpus grows past `ulimit -n` — the 4B mix has 31,905 shards against
+# a default limit of 1024. Re-opening on demand costs microseconds.
+_OPEN_SHARDS = 256
+
+
+class _ShardCache:
+    """LRU of open memmaps, shared by every shard of one dataset. Thread-safe: the Prefetcher
+    reads from a background thread while the main thread may also pull a batch."""
+
+    def __init__(self, capacity=_OPEN_SHARDS):
+        self.capacity = capacity
+        self._open = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, path, dtype):
+        with self._lock:
+            mm = self._open.pop(path, None)
+            if mm is None:
+                mm = np.memmap(path, dtype=dtype, mode="r")
+                while len(self._open) >= self.capacity:
+                    self._open.popitem(last=False)      # drop the least recently used
+            self._open[path] = mm
+            return mm
+
+
+class _LazyShard:
+    """One shard behaving like the array it maps: `len()` and slicing, opened on first touch.
+
+    The length comes from the meta (`num_tokens`) or from the file size, so building the
+    dataset touches no file at all — the 4B corpus goes from ~125s of constructor to instant.
+    """
+
+    __slots__ = ("path", "dtype", "_len", "_cache")
+
+    def __init__(self, path, dtype, n_tokens, cache):
+        self.path, self.dtype, self._len, self._cache = str(path), dtype, int(n_tokens), cache
+
+    def __len__(self):
+        return self._len
+
+    def __getitem__(self, item):
+        return self._cache.get(self.path, self.dtype)[item]
 
 
 class MemmapTokenDataset:
@@ -40,12 +88,19 @@ class MemmapTokenDataset:
         self.vocab_size = meta["vocab_size"]
         self.meta = meta
 
+        # Shards are described, not opened: `num_tokens` comes from the meta (falling back to
+        # the file size), so a 31,905-shard corpus costs zero file descriptors here.
+        self._cache = _ShardCache()
+        itemsize = np.dtype(self.np_dtype).itemsize
         shards, idxs = [], []
         for rec in meta["shards"]:
             p = self.dir / "shards" / rec["filename"]
-            mm = np.memmap(p, dtype=self.np_dtype, mode="r")
-            if len(mm) > seq_len + 1:
-                shards.append(mm); idxs.append(rec["index"])
+            n = rec.get("num_tokens")
+            if n is None:
+                n = os.path.getsize(p) // itemsize
+            if n > seq_len + 1:
+                shards.append(_LazyShard(p, self.np_dtype, n, self._cache))
+                idxs.append(rec["index"])
         if not shards:
             raise RuntimeError(f"no shard longer than seq_len+1={seq_len + 1} in {data_dir}")
 

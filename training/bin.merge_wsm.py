@@ -196,9 +196,11 @@ def main():
     if args.verify:
         del model, acc, merged
         m2 = NanoTransformer.from_pretrained(str(out))
-        m2.eval()
+        # I layer KDA (v2) girano solo su CUDA: kernel Triton, nessun fallback CPU.
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        m2.to(dev).eval()
         with torch.no_grad():
-            x = torch.randint(0, cfg.vocab_size, (1, 16))
+            x = torch.randint(0, cfg.vocab_size, (1, 16), device=dev)
             out_dict = m2(input_ids=x)
             logits = out_dict["logits"] if isinstance(out_dict, dict) else out_dict.logits
         assert logits.shape == (1, 16, cfg.vocab_size), logits.shape

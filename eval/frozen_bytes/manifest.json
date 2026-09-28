@@ -1,0 +1,18 @@
+{
+ "cobol_real": {
+  "bytes": 582670,
+  "docs": 26
+ },
+ "cobol_synth": {
+  "bytes": 525798,
+  "docs": 630
+ },
+ "code_general": {
+  "bytes": 527483,
+  "docs": 113
+ },
+ "it_legal": {
+  "bytes": 583439,
+  "docs": 119
+ }
+}

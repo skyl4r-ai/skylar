@@ -30,13 +30,10 @@ from models.layers.block import TransformerBlock
 from models.layers.norm import RMSNorm
 from models.layers.attention import (
     HAS_FLEX_ATTENTION,
-    build_cu_seqlens,
     create_document_block_mask,
     make_packing_mask,
 )
-from models.layers.attn_res import AttnResMixer
 from models.layers.kv_cache import validate_kv_cache
-from models.mtp import MTPModule
 
 logger = logging.getLogger(__name__)
 
@@ -91,23 +88,9 @@ class NanoTransformer(PreTrainedModel):
         self.token_emb = nn.Embedding(config.vocab_size, config.d_model)
         self.drop = nn.Dropout(config.dropout)
 
-        # layer_idx: ogni blocco deve sapere dove si trova, o non può sapere se è
-        # ricorrente o full-attention (config.layer_types) né indicizzare la cache.
-        self.blocks = nn.ModuleList([TransformerBlock(config, layer_idx=i)
-                                     for i in range(config.n_layers)])
-
-        # AttnRes ha 2L+1 punti di applicazione: due per blocco più questo, che
-        # sceglie da quale profondità legge la testa di output.
-        self.attn_res = bool(getattr(config, "attn_res", False))
-        if self.attn_res:
-            w = getattr(config, "attn_res_block", None)
-            self.res_final = AttnResMixer(config.d_model, window=None if not w else 2 * w + 1)
+        self.blocks = nn.ModuleList([TransformerBlock(config) for _ in range(config.n_layers)])
         self.ln_f = RMSNorm(config.d_model)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
-
-        # MTP: teste ausiliarie che predicono piu' avanti di un passo. Si SCARTANO a
-        # fine pretrain, quindi il costo deployato e' zero. Spente di default.
-        self.mtp = MTPModule(config) if getattr(config, "mtp_layers", 0) else None
 
         if config.tie_weights:
             self.lm_head.weight = self.token_emb.weight
@@ -218,24 +201,7 @@ class NanoTransformer(PreTrainedModel):
 
         return [g for g in groups if g["params"]]
 
-    @property
-    def _has_recurrent_layers(self):
-        return any(getattr(b, "layer_type", "attention") == "kda" for b in self.blocks)
-
     def _validate_kv_cache(self, kv_cache, batch_size, x_device):
-        # La validazione conosce solo la tupla (k, v) rank-4 dell'attention. In un
-        # modello ibrido la cache e' ETEROGENEA: i layer KDA portano
-        # (stato_ricorrente, stati_conv), di forma diversa. Validarli con la regola
-        # dell'attention darebbe un errore su una cache perfettamente valida.
-        if self._has_recurrent_layers:
-            if len(kv_cache) != len(self.blocks):
-                raise ValueError(f"cache con {len(kv_cache)} voci per {len(self.blocks)} layer")
-            attn_only = [(c, b) for c, b in zip(kv_cache, self.blocks)
-                         if getattr(b, "layer_type", "attention") != "kda"]
-            if attn_only:
-                validate_kv_cache([c for c, _ in attn_only], [b for _, b in attn_only],
-                                  batch_size, x_device)
-            return
         validate_kv_cache(kv_cache, self.blocks, batch_size, x_device)
 
     def forward(self, input_ids, labels=None, kv_cache=None, document_ids=None,
@@ -288,42 +254,13 @@ class NanoTransformer(PreTrainedModel):
         collect_cache = bool(use_cache or kv_cache is not None)
         new_cache = [] if collect_cache else None
 
-        # ── cu_seqlens per i layer ricorrenti ──
-        # I layer KDA non vedono la block_mask: per loro un confine di documento non
-        # è una maschera, è un punto in cui lo STATO va azzerato. Senza questo, lo
-        # stato scorre da un programma COBOL al successivo — e la loss non lo mostra.
-        cu_seqlens = None
-        if document_ids is not None and kv_cache is None and self._has_recurrent_layers:
-            cu_seqlens = build_cu_seqlens(document_ids)
-
-        residuals = [x] if self.attn_res else None
-
         for i, block in enumerate(self.blocks):
             layer_cache = kv_cache[i] if kv_cache is not None else None
             if self.gradient_checkpointing and self.training and kv_cache is None:
-                # ⚠️ Gli argomenti erano passati PER POSIZIONE: aggiungendo parametri
-                # alla firma del blocco si finiva a passare `cu_seqlens` dove il
-                # blocco si aspetta `use_cache`, senza nessun errore. Con la closure
-                # il legame è per nome e il problema non si ripresenta mai più.
-                #
-                # ⚠️ AttnRes: il blocco APPENDE le sue uscite a `residuals`. Nel backward
-                # il checkpoint riesegue il blocco: se riceve la lista vera, a quel punto
-                # contiene già le uscite di tutti i layer successivi e il ricalcolo legge
-                # sorgenti sbagliate. Il blocco lavora quindi su una COPIA congelata ora,
-                # e le due sorgenti nuove escono come output del checkpoint.
-                def _run(inp, _b=block, _c=layer_cache,
-                         _r=tuple(residuals) if residuals is not None else None):
-                    r = list(_r) if _r is not None else None
-                    out, cache = _b(inp, kv_cache=_c, block_mask=block_mask,
-                                    attention_mask=attention_mask, use_cache=False,
-                                    cu_seqlens=cu_seqlens, residuals=r)
-                    if r is None:
-                        return out, cache
-                    return out, cache, r[-2], r[-1]
-                res = torch.utils.checkpoint.checkpoint(_run, x, use_reentrant=False)
-                x, cache_i = res[0], res[1]
-                if residuals is not None:
-                    residuals.extend(res[2:])
+                x, cache_i = torch.utils.checkpoint.checkpoint(
+                    block, x, layer_cache, block_mask, attention_mask, False,
+                    use_reentrant=False,
+                )
             else:
                 x, cache_i = block(
                     x,
@@ -331,17 +268,11 @@ class NanoTransformer(PreTrainedModel):
                     block_mask=block_mask,
                     attention_mask=attention_mask,
                     use_cache=collect_cache,
-                    cu_seqlens=cu_seqlens,
-                    residuals=residuals,
                 )
 
             if collect_cache:
                 new_cache.append(cache_i)
 
-        if self.attn_res:
-            x = self.res_final(residuals)
-
-        x_pre = x                 # serve alle teste MTP, che normalizzano per conto loro
         x = self.ln_f(x)
         logits = self.lm_head(x)
 
@@ -350,24 +281,14 @@ class NanoTransformer(PreTrainedModel):
             logits = logits * self._mup_output_alpha
 
         loss = None
-        loss_parts = {}
         if labels is not None:
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)),
                 labels.view(-1),
                 ignore_index=-100,
             )
-            if self.mtp is not None and len(self.mtp):
-                # `x_pre` e' lo stato PRIMA di ln_f: la testa MTP applica la sua
-                # normalizzazione, come nel trunk.
-                loss_parts["ce"] = loss.detach()
-                aux, detail = self.mtp.loss(x_pre, self.token_emb, input_ids, labels,
-                                            self.ln_f, self.lm_head)
-                if aux is not None:
-                    loss = loss + aux
-                    loss_parts.update(detail)
 
-        return {"logits": logits, "loss": loss, "kv_cache": new_cache, "loss_parts": loss_parts}
+        return {"logits": logits, "loss": loss, "kv_cache": new_cache}
 
     def count_params(self, non_embedding=False):
         """Count parameters (optionally excluding embedding)."""

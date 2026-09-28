@@ -247,6 +247,11 @@ def save_weights_only(path, raw_model, meta=None, tokenizer_path=None, s3=None):
         async_upload_checkpoint(s3, str(path), f"wsm/{path.name}")
 
 
+def _needs_doc_ids(args):
+    """Il modello che sta per essere costruito ha layer ricorrenti?"""
+    return bool(getattr(args, "kda_ratio", None))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--preset", default="test")
@@ -259,6 +264,32 @@ def main():
     ap.add_argument("--batch_size", type=int, default=8, help="PER-GPU micro-batch")
     ap.add_argument("--grad_accum", type=int, default=6)
     ap.add_argument("--seq_len", type=int, default=2048)
+    # Il default della classe e' 0.1 e NESSUN preset lo tocca: finora ogni training e' girato con
+    # dropout attivo su FFN e residual (il 980M pubblicato ha dropout=0.1 nel suo config.json),
+    # semplicemente perche' non era raggiungibile da riga di comando. Nel pretrain moderno si fa
+    # circa UNA passata su un corpus enorme, quindi non c'e' overfitting da regolarizzare: PaLM
+    # (arXiv 2204.02311) non usa dropout in pretrain, Llama (2302.13971) e Qwen2.5 (2412.15115)
+    # nemmeno; GPT-3 (2005.14165) lo usava, ma era il 2020 e con molti meno token per parametro.
+    # Qui NON si cambia il default — i checkpoint esistenti restano riproducibili — ma ora si puo'
+    # passare `--dropout 0` sul pretrain. Da confermare con una misura nostra prima del 4B.
+    ap.add_argument("--dropout", type=float, default=None,
+                    help="sovrascrive il dropout del preset (0 = spento, consigliato in pretrain)")
+    # ── architettura v2 (docs/ARCH_V2.md). Ogni default = comportamento v1. ──
+    ap.add_argument("--kda_ratio", type=str, default=None,
+                    help="ibrido ricorrente/attention, es. '3:1'. Richiede --doc_masking")
+    ap.add_argument("--attn_res", action="store_true", help="AttnRes: attenzione sulla profondita'")
+    ap.add_argument("--attn_res_block", type=int, default=6, help="finestra AttnRes (2S+1 sorgenti)")
+    ap.add_argument("--attn_out_gate", nargs="?", const="fullrank", default=None,
+                    choices=["fullrank", "perhead"],
+                    help="output gate sui layer full-attention: per canale (fullrank) o per testa")
+    ap.add_argument("--hidden_act", type=str, default=None, choices=["swiglu", "situ_glu"])
+    ap.add_argument("--mtp_layers", type=int, default=None,
+                    help="teste di multi-token prediction (0 = spente). Si scartano a fine "
+                         "pretrain: costano il 3%% in training, zero in inferenza")
+    ap.add_argument("--mtp_loss_weight", type=float, default=None)
+    ap.add_argument("--nope", action="store_true",
+                    help="NoPE sui layer full-attention. IRREVERSIBILE e non verificabile "
+                         "dalla loss: leggi docs/ARCH_V2.md §10.2 prima di usarlo")
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--warmup", type=int, default=2000)
     ap.add_argument("--min_lr_ratio", type=float, default=0.1)
@@ -314,6 +345,21 @@ def main():
     use_doc = args.doc_masking and bos_id is not None
     batch_kwargs = {"return_doc_ids": True, "bos_id": bos_id} if use_doc else {}
 
+    # Con i layer ricorrenti il doc-masking smette di essere un'opzione. Per
+    # l'attention e' una raffinatezza: senza, un token guarda anche il documento
+    # precedente. Per KDA e' un'altra cosa — non c'e' nessuna maschera, c'e' uno
+    # STATO, e senza confini quello stato porta il contesto di un programma COBOL
+    # dentro il successivo per tutta la sua lunghezza. Non crasha e non compare in
+    # nessuna metrica: si scopre solo a modello finito. Quindi qui si ferma prima.
+    if _needs_doc_ids(args) and not use_doc:
+        raise SystemExit(
+            "Questo modello ha layer ricorrenti (kda_ratio impostato), quindi i confini "
+            "fra documenti DEVONO arrivare al trainer.\n"
+            "  Aggiungi --doc_masking (e --tokenizer, o --bos_id, per trovare <bos>).\n"
+            "Senza, lo stato ricorrente attraversa i documenti impacchettati: il training "
+            "non fallisce, impara peggio — ed e' invisibile fino alla valutazione finale."
+        )
+
     tok_per_step = args.batch_size * args.grad_accum * args.seq_len * world
     if args.steps:
         total_steps = args.steps
@@ -326,7 +372,15 @@ def main():
 
     overrides = {k: v for k, v in (("d_model", args.d_model), ("n_layers", args.n_layers),
                                    ("n_heads", args.n_heads), ("n_kv_heads", args.n_kv_heads),
-                                   ("d_ff", args.d_ff)) if v is not None}
+                                   ("d_ff", args.d_ff), ("dropout", args.dropout),
+                                   ("kda_ratio", args.kda_ratio),
+                                   ("hidden_act", args.hidden_act),
+                                   ("attn_res", args.attn_res or None),
+                                   ("attn_res_block", args.attn_res_block),
+                                   ("attn_out_gate", args.attn_out_gate),
+                                   ("nope_on_attention", args.nope or None),
+                                   ("mtp_layers", args.mtp_layers),
+                                   ("mtp_loss_weight", args.mtp_loss_weight)) if v is not None}
     cfg = get_config(args.preset, vocab_size=ds.vocab_size, **overrides)
     for attr in ("max_seq_len", "max_position_embeddings"):
         if hasattr(cfg, attr):
@@ -340,7 +394,28 @@ def main():
     if getattr(cfg, "mup_base_d_model", None):
         opt = torch.optim.AdamW(model.mup_param_groups(args.lr, args.wd), betas=(0.9, 0.95))
     else:
-        opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd, betas=(0.9, 0.95))
+        # Il weight decay va SOLO sulle matrici. Fin qui questo ramo passava
+        # `model.parameters()` in blocco, quindi decadeva anche le RMSNorm, i bias e
+        # gli embedding: e' la convenzione sbagliata di GPT-2 in poi (lo split
+        # corretto era gia' in bin.sft.py:649-656, solo qui mancava). Su una norm il
+        # decay la tira verso zero, cioe' verso l'annullare il layer che normalizza.
+        # Nell'ibrido si aggiungono A_log e dt_bias, che `fla` marca
+        # `_no_weight_decay`: governano la DINAMICA del gate di dimenticanza, non la
+        # capacita' — decaderli spinge la ricorrenza verso un decadimento fisso.
+        decay, no_decay = [], []
+        for _n, _p in model.named_parameters():
+            if not _p.requires_grad:
+                continue
+            (no_decay if (_p.dim() < 2 or getattr(_p, "_no_weight_decay", False))
+             else decay).append(_p)
+        opt = torch.optim.AdamW(
+            [{"params": decay, "weight_decay": args.wd},
+             {"params": no_decay, "weight_decay": 0.0}],
+            lr=args.lr, betas=(0.9, 0.95),
+        )
+        if is_main:
+            print(f"[opt] weight decay {args.wd} su {len(decay)} tensori; "
+                  f"{len(no_decay)} esclusi (norm, bias, embedding, A_log/dt_bias)")
 
     # resume: load weights BEFORE prepare (so DDP broadcasts identical weights)
     start_step, tokens_seen, best_val = 0, 0, float("inf")
@@ -419,16 +494,29 @@ def main():
 
     @torch.no_grad()
     def val_loss(n=40):
-        raw_model.eval(); tot = 0.0
+        """
+        Ritorna (loss_totale, loss_CE).
+
+        Con MTP acceso la loss totale include il termine ausiliario: confrontarla
+        con quella di un run senza MTP e' mele-contro-pere, e la curva smette di
+        essere confrontabile con lo storico. La CE della testa principale e' quella
+        che va guardata e su cui si seleziona il checkpoint; la totale resta per
+        vedere se l'ausiliaria sta convergendo.
+        """
+        raw_model.eval(); tot = 0.0; tot_ce = 0.0
         for _ in range(n):
             batch = ds.get_batch("val", args.batch_size, device, **batch_kwargs)
             doc = batch[2] if len(batch) == 3 else None
             x, y = batch[0], batch[1]
             with torch.autocast(device.type, dtype=amp_dtype, enabled=(device.type == "cuda")):
-                tot += raw_model(input_ids=x, labels=y, document_ids=doc)["loss"].item()
+                out = raw_model(input_ids=x, labels=y, document_ids=doc)
+            tot += out["loss"].item()
+            parts = out.get("loss_parts") or {}
+            tot_ce += float(parts["ce"]) if "ce" in parts else out["loss"].item()
         raw_model.train()
-        t = torch.tensor([tot / max(1, n)], device=device)
-        return accelerator.gather(t).mean().item()
+        t = torch.tensor([tot / max(1, n), tot_ce / max(1, n)], device=device)
+        g = accelerator.gather(t.unsqueeze(0)).mean(0)
+        return g[0].item(), g[1].item()
 
     done_ms = {m for m in milestones if (Path(args.out) / f"step_tok{int(m/1e9)}B").exists()}
     wsm_step = int(args.wsm_every_tok) if args.wsm_every_tok and args.wsm_every_tok > 0 else 0
@@ -469,7 +557,7 @@ def main():
                 train_secs += time.time() - _t_step
 
             if step % args.eval_every == 0 or step == total_steps - 1:
-                vl = val_loss()
+                vl, vl_ce = val_loss()
                 el = time.time() - t0
                 tps = (tokens_seen - seen0) / max(1e-9, train_secs)
                 eta_h = (total_steps - step) * tok_per_step / max(1, tps) / 3600
@@ -477,16 +565,21 @@ def main():
                     wnorm = global_weight_norm(raw_model)
                     upd_ratio = (lr * grad_norm / wnorm) if wnorm > 0 else 0.0
                     rec = {"step": step, "tokens": tokens_seen, "lr": lr, "train_loss": train_loss,
-                           "val_loss": vl, "ppl": math.exp(min(vl, 20)), "tok_s": tps, "eta_h": eta_h,
+                           "val_loss": vl, "val_ce": vl_ce, "ppl": math.exp(min(vl_ce, 20)),
+                           "tok_s": tps, "eta_h": eta_h,
                            "grad_norm": grad_norm, "weight_norm": wnorm, "update_ratio": upd_ratio,
                            "matrix_norms": matrix_norms(raw_model), "gpus": gpu_telemetry(), "wall_s": el}
                     log_metrics(rec)
                     watts = sum(g["power_w"] for g in rec["gpus"]) if rec["gpus"] else 0.0
                     print(f"  step {step:6d}/{total_steps}  tok {tokens_seen/1e9:.2f}B  lr {lr:.2e}  "
-                          f"train {train_loss:.3f}  val {vl:.3f}  ppl {math.exp(min(vl,20)):.1f}  "
+                          f"train {train_loss:.3f}  val {vl_ce:.3f}  ppl {math.exp(min(vl_ce,20)):.1f}  "
                           f"gnorm {grad_norm:.2f}  {tps/1e3:.1f}k tok/s  {watts:.0f}W  ETA {eta_h:.1f}h", flush=True)
-                    if vl < best_val:
-                        best_val = vl
+                    # Il "best" si seleziona sulla CE della testa principale, non
+                    # sulla loss totale: con MTP la totale include l'ausiliaria, e un
+                    # checkpoint scelto su quella ottimizza in parte un obiettivo che
+                    # all'inferenza viene buttato via insieme alla testa.
+                    if vl_ce < best_val:
+                        best_val = vl_ce
                         save_ckpt(Path(args.out) / "best", raw_model, opt, step, tokens_seen, args, best_val, ds, train_pf, s3)
 
             for m in milestones:

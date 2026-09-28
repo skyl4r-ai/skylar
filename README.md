@@ -125,6 +125,41 @@ python inference/bin.chat.py --model checkpoints_sft/best
 
 <br>
 
+## 🆕 Skylar 2 — hybrid recurrent/attention architecture (opt-in)
+
+Skylar 2 is a revision of the architecture aimed at long-context, domain-specialised code models
+(COBOL first: programs + copybooks + JCL make long context a functional requirement). It lives in
+the same codebase **behind flags** — with every flag off the model is **bit-identical to v1**, so all
+published checkpoints load and generate exactly as before.
+
+| Component | Flag | What it does |
+|:--|:--|:--|
+| Kimi Delta Attention hybrid | `--kda_ratio 3:1` | 3 recurrent layers per full-attention layer, sized at **parameter parity** (`H_kda = (n_heads + n_kv_heads)/2`) |
+| Attention Residuals | `--attn_res` | each sub-layer attends over depth instead of summing into one stream (memory-free reformulation) |
+| Output gate | `--attn_out_gate perhead` | sigmoid gate on attention output, full-attention layers only |
+| SiTU-GLU | `--hidden_act situ_glu` | bounded GLU variant, zero extra parameters |
+
+Measured on a controlled three-seed A/B over real COBOL (112M): **−21.9% perplexity at +3.0%
+parameters**, **2.45× faster training** at seq 4096. **No Skylar 2 model has been trained at scale
+yet** — the technical report is in [`docs/PAPER_V2.md`](docs/PAPER_V2.md)
+([PDF](docs/paper/skylar2_paper.pdf)).
+
+```bash
+pip install -r requirements.txt            # includes flash-linear-attention (pinned, MIT)
+python eval/bin.gate_arch_v2.py            # 12 correctness gates (parity with v1, init, cache, doc isolation)
+python training/bin.pretrain.py --preset 1B_D --data <tokenized_dir> --tokenizer <tokenizer.json> \
+    --seq_len 8192 --kda_ratio 3:1 --attn_res --attn_out_gate perhead --hidden_act situ_glu \
+    --doc_masking --dropout 0 --lr_schedule constant --compile --grad_ckpt
+python eval/bin.cache_parity.py --ckpt <out>/last   # cache vs full recompute on a trained checkpoint
+```
+
+`--doc_masking` is mandatory with recurrent layers (the trainer refuses to start without it): it is
+what stops the recurrent state from crossing document boundaries in packed sequences. The recurrent
+kernels need CUDA. The bits-per-byte tool (`eval/bin.bits_per_byte.py`) ships without its frozen
+evaluation text, which is drawn from our private corpus; only its manifest is public.
+
+<br>
+
 ## 🔬 Core Components
 
 | Component            | Implementation                        | Why                                        |
@@ -637,6 +672,8 @@ provider's CLI (e.g. `runpodctl`), and pull checkpoints back with `utils/bin.dow
 - [x] ⌨️ COBOL code specialist — from-scratch, COBOLEval-validated ([Skylar-980M-Cobol](https://huggingface.co/Skyl4r-Ai/Skylar-980M-Cobol))
 - [x] 📦 Push-to-Hub — native via `PreTrainedModel`; model family live on the Hub
 - [x] 🌐 OpenAI-compatible inference server — ships in the [`skylar`](https://pypi.org/project/skylar/) pip package
+- [x] 🆕 Skylar 2 — hybrid KDA/attention + Attention Residuals + output gate + SiTU-GLU, behind flags ([report](docs/PAPER_V2.md))
+- [ ] 🧪 First Skylar 2 model trained at scale (990M), compared head-to-head with Skylar-980M-Cobol
 - [ ] 🔭 Long-context: sliding-window attention + YaRN (for 8K+)
 - [ ] 🎯 Classic DPO (optional; `bin.preference.py` covers the reference-free variants)
 
@@ -647,6 +684,7 @@ provider's CLI (e.g. `runpodctl`), and pull checkpoints back with `utils/bin.dow
 | Document                                         | Description                                     |
 |:-------------------------------------------------|:------------------------------------------------|
 | [`docs/PAPER.md`](docs/PAPER.md)                 | Full technical paper — Skylar v3.0 architecture |
+| [`docs/PAPER_V2.md`](docs/PAPER_V2.md)           | Technical report — Skylar 2 hybrid architecture ([PDF](docs/paper/skylar2_paper.pdf)) |
 | [`docs/RESULTS.md`](docs/RESULTS.md)             | **Validated results** — public benchmarks + retrieval vs bge-m3 / e5 |
 | [`docs/POSTTRAIN.md`](docs/POSTTRAIN.md)         | Post-training suite — chat, embeddings, sparse, classifier |
 | [`docs/GUIDE.md`](docs/GUIDE.md)                 | Step-by-step training guide                     |
@@ -691,6 +729,10 @@ for the full terms and attribution.
 You are free to use, modify, and distribute this software under the terms of the
 Apache 2.0 license, provided you retain the copyright, patent, trademark, and
 attribution notices.
+
+**Model weights are licensed separately** — see each model card on the Hub. The Apache 2.0 license
+covers this framework's source code only. Skylar 2 models will be released under the
+**PolyForm Noncommercial License 1.0.0**.
 
 <br>
 
