@@ -767,7 +767,7 @@ without raising errors), Transformers 4.52.4. Hardware: one RTX 4090 (24 GB). Th
 [19] J. Su et al. RoFormer: Enhanced Transformer with Rotary Position Embedding. arXiv:2104.09864.
 [20] J. Ainslie et al. GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints. arXiv:2305.13245.
 [21] N. Shazeer. GLU Variants Improve Transformer. arXiv:2002.05202.
-[22] Moonshot AI. Kimi K3 Technical Report. 2026.
+[22] Kimi Team. Kimi K3: Open Frontier Intelligence. Technical report, 2026. github.com/MoonshotAI/Kimi-K3.
 [23] DeepSeek-AI. DeepSeek-V3 Technical Report. arXiv:2412.19437.
 [24] Zhou, Xing, Huang, Qiu and Guo. How to Set the Learning Rate for Large-Scale Pre-training? arXiv:2601.05049.
 [25] Tian et al. WSM: Decay-Free Learning Rate Schedule via Checkpoint Merging for LLM Pre-training. arXiv:2507.17634.
