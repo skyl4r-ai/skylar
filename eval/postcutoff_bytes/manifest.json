@@ -1,0 +1,1605 @@
+{
+ "built_at": "2026-09-30T16:48:50+00:00",
+ "cutoff": "2026-08-01",
+ "purpose": "held-out text published after both pre-training corpora were closed (980M: June 2026; Skylar 2 v5: July 2026); stopping rule of docs/PAPER_V2.md §7",
+ "slices": {
+  "cobol_new": {
+   "docs": 72,
+   "bytes": 550374,
+   "rejected": {
+    "overlap_corpus": 57,
+    "overlap_set": 75,
+    "undecodable": 0
+   },
+   "filter": "repositories created after 2026-08-01, no forks, <=3 files and <=40,000 bytes per repository; files sharing more than 20% of their whitespace 10-grams with our COBOL sources, or with a file already kept, are excluded",
+   "files": [
+    {
+     "repo": "GoudaCouda/cobolscope",
+     "created_at": "2026-09-01T22:46:22Z",
+     "commit": "b6ab4d3864160959c00550558fd4452467e8814d",
+     "path": "tests/fixtures/bank_of_z/cobol/INQACCCU.cbl",
+     "license": "Apache-2.0",
+     "bytes": 28815,
+     "overlap_with_corpus": 0.0017,
+     "sha256": "2de646339740a94e019a47e59cff98bd582839fa4127327e7eeca9a702cc8a53"
+    },
+    {
+     "repo": "gabriel-paiva17/idzee-pipeline",
+     "created_at": "2026-09-02T19:44:18Z",
+     "commit": "4a6003e0c940e5db5c8b7e2344da2e4e576c838c",
+     "path": "copybook/epsmlis.cpy",
+     "license": null,
+     "bytes": 17783,
+     "overlap_with_corpus": 0.0349,
+     "sha256": "1a2e6bed5aaca882e4bdb6a030f16cce51bc4b990f82241c2c6989b33c6d626e"
+    },
+    {
+     "repo": "JuanCarlos1970/modernizacion-del-mundo-COBOL-IA",
+     "created_at": "2026-09-21T18:40:06Z",
+     "commit": "1f5350e81ab647b1e34473dfb82df10be505a584",
+     "path": "cuenta.cbl",
+     "license": "MIT",
+     "bytes": 27147,
+     "overlap_with_corpus": 0.0008,
+     "sha256": "810d188a319642b6325bc8790cdd51a3a77ec29945fc119bc0ce15be7ca0bbd4"
+    },
+    {
+     "repo": "JuanCarlos1970/modernizacion-del-mundo-COBOL-IA",
+     "created_at": "2026-09-21T18:40:06Z",
+     "commit": "1f5350e81ab647b1e34473dfb82df10be505a584",
+     "path": "CLIENTE.cpy",
+     "license": "MIT",
+     "bytes": 1568,
+     "overlap_with_corpus": 0.0,
+     "sha256": "43896c7d605aaef317d3fab26cf956d4928d9f8bc11d49099e2a47a446a18fb8"
+    },
+    {
+     "repo": "ericarnaboldi/cobol-journey",
+     "created_at": "2026-09-27T18:33:16Z",
+     "commit": "cf28b9b36c62bf8fdbb9e34d164d79e9e47fee8a",
+     "path": "exercices/MOVES.cbl",
+     "license": null,
+     "bytes": 1345,
+     "overlap_with_corpus": 0.0,
+     "sha256": "15fa52006b5b9e8141152b38dfcbc76a2abe8ec14178db3ad007634067db6fa1"
+    },
+    {
+     "repo": "ericarnaboldi/cobol-journey",
+     "created_at": "2026-09-27T18:33:16Z",
+     "commit": "cf28b9b36c62bf8fdbb9e34d164d79e9e47fee8a",
+     "path": "exercices/FICHE.cbl",
+     "license": null,
+     "bytes": 1182,
+     "overlap_with_corpus": 0.0,
+     "sha256": "7dd87fc73d359d4bb9bdbceeb6a4c4f5a363d06e0aac8023d7583065c80fff1a"
+    },
+    {
+     "repo": "ericarnaboldi/cobol-journey",
+     "created_at": "2026-09-27T18:33:16Z",
+     "commit": "cf28b9b36c62bf8fdbb9e34d164d79e9e47fee8a",
+     "path": "exercices/VOILIER.cbl",
+     "license": null,
+     "bytes": 832,
+     "overlap_with_corpus": 0.0,
+     "sha256": "a01d752d106f221f9f45a2df42e24a9196c31e01e287c604bc0be0df8aecde2e"
+    },
+    {
+     "repo": "squid-protocol/cics-crucible",
+     "created_at": "2026-09-29T15:30:28Z",
+     "commit": "94f2afcbe6adfb88009c60b427dfab1aecf72a3c",
+     "path": "cases/pseudo-conversational/pc-wizard/src/PCCONF.cbl",
+     "license": "Apache-2.0",
+     "bytes": 4348,
+     "overlap_with_corpus": 0.0,
+     "sha256": "7aaa6d3005d4521964f68ca0a982738179361044b190e07b8eeca33bb13cfd9a"
+    },
+    {
+     "repo": "squid-protocol/cics-crucible",
+     "created_at": "2026-09-29T15:30:28Z",
+     "commit": "94f2afcbe6adfb88009c60b427dfab1aecf72a3c",
+     "path": "cases/condition-handling/hc-perform-range/src/HCQREAD.cbl",
+     "license": "Apache-2.0",
+     "bytes": 4251,
+     "overlap_with_corpus": 0.0,
+     "sha256": "2127947341602c7088a65a1318d1e3255cc11799b3d0ac15f899509c1ca9eb51"
+    },
+    {
+     "repo": "squid-protocol/cics-crucible",
+     "created_at": "2026-09-29T15:30:28Z",
+     "commit": "94f2afcbe6adfb88009c60b427dfab1aecf72a3c",
+     "path": "cases/hex-attributes/hx-attr-bytes/src/HXATTR.cbl",
+     "license": "Apache-2.0",
+     "bytes": 3682,
+     "overlap_with_corpus": 0.0,
+     "sha256": "7ab9fcd47c980365077a37772e5219f7605d30072e61af2d911c6cb686394e00"
+    },
+    {
+     "repo": "kamaladevisuresh/cobol-to-java-modernization",
+     "created_at": "2026-09-30T10:51:15Z",
+     "commit": "9997266c093b2d26d9cfa34924b163b0924a0756",
+     "path": "ELIGCHK.cob",
+     "license": null,
+     "bytes": 1467,
+     "overlap_with_corpus": 0.0,
+     "sha256": "5616eaa37d7d1d9af121fe0bcaaaa02032583983b53a41f9ab1ac7af76f38675"
+    },
+    {
+     "repo": "aruto-nick/cobol-study",
+     "created_at": "2026-09-30T03:48:51Z",
+     "commit": "1b0868406c7341151f2a3d0a046fa9e1c15e912c",
+     "path": "shipping-batch.cbl",
+     "license": null,
+     "bytes": 7447,
+     "overlap_with_corpus": 0.0,
+     "sha256": "55866c2823bed0f72e6572848dcdbc508ce32b4ef4fb65eaafc85509a0bede91"
+    },
+    {
+     "repo": "MoonKi98/skills-modernize-your-legacy-code-with-github-copilot",
+     "created_at": "2026-09-30T07:24:56Z",
+     "commit": "baa40b23f569b08f910b085d6e81405801fce8b0",
+     "path": "src/cobol/operations.cob",
+     "license": "MIT",
+     "bytes": 1503,
+     "overlap_with_corpus": 0.0,
+     "sha256": "bf1588199cf852fd99794800df6434624654b458b0f6df7d55110306a650217f"
+    },
+    {
+     "repo": "MoonKi98/skills-modernize-your-legacy-code-with-github-copilot",
+     "created_at": "2026-09-30T07:24:56Z",
+     "commit": "baa40b23f569b08f910b085d6e81405801fce8b0",
+     "path": "src/cobol/main.cob",
+     "license": "MIT",
+     "bytes": 1298,
+     "overlap_with_corpus": 0.0,
+     "sha256": "fdc9bb210b1a18809cbb8ae1cded1997661a081a3fd01ba989b98cfb27177f98"
+    },
+    {
+     "repo": "timamero/cobol-fundamentals-project",
+     "created_at": "2026-09-28T23:16:34Z",
+     "commit": "4b31172c7f665b835d1b38a511ca69ef05a53ff7",
+     "path": "employee/employee.cbl",
+     "license": null,
+     "bytes": 1021,
+     "overlap_with_corpus": 0.0,
+     "sha256": "f4c704ee065c000256ce1efa89ea13b1d7875a41c84f08a2d657f2569d67f086"
+    },
+    {
+     "repo": "William2716057/Horners_method",
+     "created_at": "2026-09-30T00:31:22Z",
+     "commit": "a05a4be8aa278cae8c9deb71908ce6e008cf3021",
+     "path": "sol.cbl",
+     "license": null,
+     "bytes": 1634,
+     "overlap_with_corpus": 0.0071,
+     "sha256": "3d84579aae1bffe7cf46b1f1463a52a216a0ea11754c75663d9b36fe7db0c2ef"
+    },
+    {
+     "repo": "davidelgado28/nightly-bank-batch",
+     "created_at": "2026-09-29T23:02:58Z",
+     "commit": "1e959e035c5e170e2528e3ffbb21bafdaa31e30b",
+     "path": "src/reconcil.cbl",
+     "license": null,
+     "bytes": 3871,
+     "overlap_with_corpus": 0.0,
+     "sha256": "97a4b7aa3d5d014c0656dd30d7ccafe615301bb0b03e17b34a31fc9ffb588155"
+    },
+    {
+     "repo": "joseluizmartins/COBOL_retrolabs-acme-cobol-1984",
+     "created_at": "2026-09-29T21:15:20Z",
+     "commit": "44ed11d336007fe45c30b664fb63347a8fdcf44c",
+     "path": "fontes/RACREC.CBL",
+     "license": null,
+     "bytes": 29789,
+     "overlap_with_corpus": 0.0003,
+     "sha256": "89dd62ec71606758e2695353b31e077026af41f13f926533e6908cef6c4545b8"
+    },
+    {
+     "repo": "joseluizmartins/COBOL_retrolabs-acme-cobol-1984",
+     "created_at": "2026-09-29T21:15:20Z",
+     "commit": "44ed11d336007fe45c30b664fb63347a8fdcf44c",
+     "path": "utilitarios/RACINIT.CBL",
+     "license": null,
+     "bytes": 7200,
+     "overlap_with_corpus": 0.0015,
+     "sha256": "3b3fee5e66a623a1e364d622db9e61d3c3c68a047d0ef4df544245d176998d07"
+    },
+    {
+     "repo": "joseluizmartins/COBOL_retrolabs-acme-cobol-1984",
+     "created_at": "2026-09-29T21:15:20Z",
+     "commit": "44ed11d336007fe45c30b664fb63347a8fdcf44c",
+     "path": "testes/TSTSHR.CBL",
+     "license": null,
+     "bytes": 2866,
+     "overlap_with_corpus": 0.0033,
+     "sha256": "8f3d237047cb9d39e406188b958fc029d9a695ee5e409b15e664307dab755f59"
+    },
+    {
+     "repo": "William2716057/minidb",
+     "created_at": "2026-09-29T06:08:41Z",
+     "commit": "4381e1b0366c6a0cebcfb2aa4094269bea88f7e8",
+     "path": "minidb.cbl",
+     "license": null,
+     "bytes": 5147,
+     "overlap_with_corpus": 0.0,
+     "sha256": "d34a1be3adfa92aca6c9084ad9eea25e82427f7d3fa385bf0355d706e89f76c2"
+    },
+    {
+     "repo": "fernando1858/BANKCOBOL",
+     "created_at": "2026-09-29T01:18:36Z",
+     "commit": "5bb692b331953d4d81d792cebb7130b7b7d5b7fb",
+     "path": "CLIENTES.CBL",
+     "license": null,
+     "bytes": 29794,
+     "overlap_with_corpus": 0.0006,
+     "sha256": "1dd9b11075c1e108a6b975ee92b3b81a43f061762fe280128175cfdb6c944fd9"
+    },
+    {
+     "repo": "fernando1858/BANKCOBOL",
+     "created_at": "2026-09-29T01:18:36Z",
+     "commit": "5bb692b331953d4d81d792cebb7130b7b7d5b7fb",
+     "path": "CUENTAS.CBL",
+     "license": null,
+     "bytes": 9630,
+     "overlap_with_corpus": 0.0,
+     "sha256": "92c425674551f091cd189ffb877afca80412870a99856759f631154a759e8df6"
+    },
+    {
+     "repo": "William2716057/HTML_build",
+     "created_at": "2026-09-29T04:12:59Z",
+     "commit": "d8c4d51db9c9b8d5a3eff6e16cc99f0d0d2e07fd",
+     "path": "html_build.cbl",
+     "license": null,
+     "bytes": 9285,
+     "overlap_with_corpus": 0.0052,
+     "sha256": "013855695b61a76820e06a3401c55e00dbef7596491211339d7843ec1f60f8a8"
+    },
+    {
+     "repo": "William2716057/sales_report",
+     "created_at": "2026-09-29T04:08:01Z",
+     "commit": "e0a65a17ff274d3f1bbbdeb9b0b71b71080beb72",
+     "path": "sales_report.cbl",
+     "license": null,
+     "bytes": 16986,
+     "overlap_with_corpus": 0.0008,
+     "sha256": "f465cdb480da9b43ae723f58467ff2bf94efae3575de129d02f26c03fa6b80f7"
+    },
+    {
+     "repo": "Parax342/snowball",
+     "created_at": "2026-09-29T04:07:17Z",
+     "commit": "6f5a4e34d9af5f8b342c5298e071c7d4d9f54f44",
+     "path": "snowball.cob",
+     "license": null,
+     "bytes": 10797,
+     "overlap_with_corpus": 0.0,
+     "sha256": "010e2d18ffc50d1a0ed02c1485caad7792dc8fc15edc3351ae951056e72a124c"
+    },
+    {
+     "repo": "DaherDjama/cobol-check-automation",
+     "created_at": "2026-09-16T11:47:52Z",
+     "commit": "a2546de310e0a12e591bc1cdd694053784fc0da0",
+     "path": "cobol-check/src/main/cobol/ALPHA.CBL",
+     "license": "MIT",
+     "bytes": 1020,
+     "overlap_with_corpus": 0.0,
+     "sha256": "716c7f1e3808f870830007e362fabbd8838d35374633e1e2f02a705615b8d4ea"
+    },
+    {
+     "repo": "DaherDjama/cobol-check-automation",
+     "created_at": "2026-09-16T11:47:52Z",
+     "commit": "a2546de310e0a12e591bc1cdd694053784fc0da0",
+     "path": "cobol-check/src/main/cobol/NUMBERS.CBL",
+     "license": "MIT",
+     "bytes": 880,
+     "overlap_with_corpus": 0.0,
+     "sha256": "fd4e88aa1da71201ed62636b4571572e362bec215fc77b06e94bcf55947d9c0d"
+    },
+    {
+     "repo": "tuna4ll/cobolfetch",
+     "created_at": "2026-09-23T18:00:18Z",
+     "commit": "52c2bf44a6193f40dae5c869fa3a223c735c1fe0",
+     "path": "main.cob",
+     "license": "BSD-2-Clause",
+     "bytes": 12054,
+     "overlap_with_corpus": 0.0008,
+     "sha256": "001b73878de4bda5f983ed122d2015eaa00a35abf1074d494dbd902f35c7eb01"
+    },
+    {
+     "repo": "manasachowdary840-collab/Cobol-mainframe",
+     "created_at": "2026-09-28T16:55:27Z",
+     "commit": "4ea2febd349c675c1aaf0a608274465688eda13f",
+     "path": "Employeebatch.cbl",
+     "license": null,
+     "bytes": 1717,
+     "overlap_with_corpus": 0.0597,
+     "sha256": "74dcca68ea5cf0925105ba09c64e32f84ec69dbf808c5a588024f94821e2ea0c"
+    },
+    {
+     "repo": "JorgeGS8/SistemasLegadosG9",
+     "created_at": "2026-09-21T13:32:10Z",
+     "commit": "a320f25d472e0772d00b55f2011a658cb8ca68a0",
+     "path": "Practica1/ATM_Cobol_backup/BANK7.cbl",
+     "license": null,
+     "bytes": 23858,
+     "overlap_with_corpus": 0.0163,
+     "sha256": "9d37819a349abe5838fe15aa9db50e2cfa0e3e7134c1c846414f90367ab5cdef"
+    },
+    {
+     "repo": "JorgeGS8/SistemasLegadosG9",
+     "created_at": "2026-09-21T13:32:10Z",
+     "commit": "a320f25d472e0772d00b55f2011a658cb8ca68a0",
+     "path": "Practica1/ATM_Cobol_backup/BANK9.cbl",
+     "license": null,
+     "bytes": 14870,
+     "overlap_with_corpus": 0.0292,
+     "sha256": "e02a0f74e354a150bd6a5357412b1bb7289591c02ed5aac0a0461a34750bf937"
+    },
+    {
+     "repo": "ravi14soni/EmployeePayroll_COBOL",
+     "created_at": "2026-09-28T13:40:12Z",
+     "commit": "d8456f5a23434416b3927ce2ba142915e32066bc",
+     "path": "src/PAYROLL.COB",
+     "license": null,
+     "bytes": 19060,
+     "overlap_with_corpus": 0.0007,
+     "sha256": "c3316ea043e80c14723c2e641ef9b677bbbd6c04281d318dacf76e982ae6f0d1"
+    },
+    {
+     "repo": "ravi14soni/EmployeePayroll_COBOL",
+     "created_at": "2026-09-28T13:40:12Z",
+     "commit": "d8456f5a23434416b3927ce2ba142915e32066bc",
+     "path": "src/EMPLOYEE.COB",
+     "license": null,
+     "bytes": 8764,
+     "overlap_with_corpus": 0.0016,
+     "sha256": "d0171c2e72b44654a147bf8b26c82cb520808a46f353a404c0a6efda1ce465a5"
+    },
+    {
+     "repo": "ravi14soni/EmployeePayroll_COBOL",
+     "created_at": "2026-09-28T13:40:12Z",
+     "commit": "d8456f5a23434416b3927ce2ba142915e32066bc",
+     "path": "src/TABLETEST.COB",
+     "license": null,
+     "bytes": 1490,
+     "overlap_with_corpus": 0.0,
+     "sha256": "f8eea0c9b37a9a6be67f9adba87a3581009838d7dac3d502cc500c5a25cdda2e"
+    },
+    {
+     "repo": "TWOmendes2/biblioteca-cobol",
+     "created_at": "2026-09-28T14:02:34Z",
+     "commit": "ef7eade38d327bba63e6a964572294c46ae0b0e9",
+     "path": "biblioteca.cob",
+     "license": null,
+     "bytes": 14410,
+     "overlap_with_corpus": 0.0,
+     "sha256": "34e05c03b740c947bdb0b4810a6c306b526ccc548297d67d71ad4ae5405841c8"
+    },
+    {
+     "repo": "ssainzz/sistemas-legados",
+     "created_at": "2026-09-09T12:08:10Z",
+     "commit": "5638f4198ed563f4d498f14758808d3db9a752c6",
+     "path": "p1/ATM Cobol_backup/BANK6.cbl",
+     "license": null,
+     "bytes": 25861,
+     "overlap_with_corpus": 0.0147,
+     "sha256": "19a0f92337ee7e7e72cf6e1498f4832a5746bc76ec7814a33ea5315c93142b9b"
+    },
+    {
+     "repo": "ssainzz/sistemas-legados",
+     "created_at": "2026-09-09T12:08:10Z",
+     "commit": "5638f4198ed563f4d498f14758808d3db9a752c6",
+     "path": "p1/ATM Cobol_backup/BANK8.cbl",
+     "license": null,
+     "bytes": 8189,
+     "overlap_with_corpus": 0.0465,
+     "sha256": "4e841bfcc35eb103850658c3645f8cb412a6270b44f0ae68306cc3c1d69ead59"
+    },
+    {
+     "repo": "naveenrab22/zos-cobol-practice",
+     "created_at": "2026-09-28T07:30:19Z",
+     "commit": "07c2c815b069db617e088daa4013731e00dc4b27",
+     "path": "COBOL/sortfile.cbl",
+     "license": null,
+     "bytes": 3695,
+     "overlap_with_corpus": 0.0418,
+     "sha256": "2932d43f45332fb1cc8e291c4db864d5cccaaea0c4f3a78d51e656e3253208a6"
+    },
+    {
+     "repo": "naveenrab22/zos-cobol-practice",
+     "created_at": "2026-09-28T07:30:19Z",
+     "commit": "07c2c815b069db617e088daa4013731e00dc4b27",
+     "path": "COBOL/hello.cbl",
+     "license": null,
+     "bytes": 2194,
+     "overlap_with_corpus": 0.016,
+     "sha256": "36620057730bde0ee442a5dd9827811a738d08462e1b4223d7e7b4d59ef6190e"
+    },
+    {
+     "repo": "naveenrab22/zos-cobol-practice",
+     "created_at": "2026-09-28T07:30:19Z",
+     "commit": "07c2c815b069db617e088daa4013731e00dc4b27",
+     "path": "COBOL/s0c7demo.cbl",
+     "license": null,
+     "bytes": 2083,
+     "overlap_with_corpus": 0.0124,
+     "sha256": "c5685fa696614d371f6bfab70ff2ecf5b5445eb92c7900c61d424baba7e2abec"
+    },
+    {
+     "repo": "bshongwe/payment-pipeline",
+     "created_at": "2026-09-26T21:05:18Z",
+     "commit": "ef98299255f87c992d58c9e425fdcd41ce99703c",
+     "path": "core/PAYORCH.cbl",
+     "license": null,
+     "bytes": 1992,
+     "overlap_with_corpus": 0.0,
+     "sha256": "408bffb55a2dc404604b4176a7de2c92c5b2dc5bc5b281f3111f86a1a565306d"
+    },
+    {
+     "repo": "bshongwe/payment-pipeline",
+     "created_at": "2026-09-26T21:05:18Z",
+     "commit": "ef98299255f87c992d58c9e425fdcd41ce99703c",
+     "path": "core/PAYVAL.cbl",
+     "license": null,
+     "bytes": 1881,
+     "overlap_with_corpus": 0.0,
+     "sha256": "bf5f75d8a992f0a5ba3587537b683ce3782cacdec44fd6c8653029ef281bad6a"
+    },
+    {
+     "repo": "bshongwe/payment-pipeline",
+     "created_at": "2026-09-26T21:05:18Z",
+     "commit": "ef98299255f87c992d58c9e425fdcd41ce99703c",
+     "path": "security/PAYHSM.cbl",
+     "license": null,
+     "bytes": 1859,
+     "overlap_with_corpus": 0.0,
+     "sha256": "fd003975f97b46c0d903a10b1428388fceb43d75f784c4ec3883573b98dfe088"
+    },
+    {
+     "repo": "entrezunfredici/cobol_sandbox",
+     "created_at": "2026-09-24T09:19:55Z",
+     "commit": "f4b8b070bafd9f406e2d03ff722f6869a4a2c111",
+     "path": "E1_presentation/presentation.cob",
+     "license": null,
+     "bytes": 1012,
+     "overlap_with_corpus": 0.0,
+     "sha256": "d10ebf7f94e0418188ba5e83d6f5c939a882504ecf0b0b2e2823638ba8e5bbb4"
+    },
+    {
+     "repo": "math-mcruz/SOURCE-TCC",
+     "created_at": "2026-09-12T18:30:25Z",
+     "commit": "e9f34d243e24280b260b7a28bfb73017df09459b",
+     "path": "DATASET/EXPERIMENTO/COMPLETO/cobol_src/DELCUS.cbl",
+     "license": "EPL-2.0",
+     "bytes": 24790,
+     "overlap_with_corpus": 0.0071,
+     "sha256": "fcdd087a750bf489e8e2af9ea293f9f7229a69e11e01c57cd826e7d3ce571662"
+    },
+    {
+     "repo": "nocivescience/Contactos_27_9_2026",
+     "created_at": "2026-09-27T20:26:53Z",
+     "commit": "9cc5cf33aa5b5b6d34b7524770c2b77e05585c70",
+     "path": "main.cob",
+     "license": null,
+     "bytes": 2070,
+     "overlap_with_corpus": 0.0042,
+     "sha256": "43360c768ce123751503c6e54582a45713df5c49dc4d258c67abe38829bcee33"
+    },
+    {
+     "repo": "f26-cen40201-InCollege/Nevada1",
+     "created_at": "2026-09-03T02:08:43Z",
+     "commit": "6d8fff4b3831d08e4d46e3f747faf7ba0bae1b99",
+     "path": "test-main.cob",
+     "license": null,
+     "bytes": 18719,
+     "overlap_with_corpus": 0.0,
+     "sha256": "cb54b0fae1e25d2e8ae58464711f8caac366a31736bd7f421d97b541e36e2b18"
+    },
+    {
+     "repo": "f26-cen40201-InCollege/Nevada1",
+     "created_at": "2026-09-03T02:08:43Z",
+     "commit": "6d8fff4b3831d08e4d46e3f747faf7ba0bae1b99",
+     "path": "tests/copy_file.cob",
+     "license": null,
+     "bytes": 2064,
+     "overlap_with_corpus": 0.0,
+     "sha256": "d288f04c880946efbb977a89baa5ac377913d55aa1bd555fff36443c05235d61"
+    },
+    {
+     "repo": "paulogarithm/cobol-projects",
+     "created_at": "2026-09-25T12:47:53Z",
+     "commit": "aae45f11e7617c817c95ad31bf2a715a978d5198",
+     "path": "bank-closer/closer.cob",
+     "license": null,
+     "bytes": 6093,
+     "overlap_with_corpus": 0.0,
+     "sha256": "6205c2926c086a48ee35dc47f0c8528d81546ce1a4fd2437f51a740ad2f9fa5e"
+    },
+    {
+     "repo": "paulogarithm/cobol-projects",
+     "created_at": "2026-09-25T12:47:53Z",
+     "commit": "aae45f11e7617c817c95ad31bf2a715a978d5198",
+     "path": "ebcdic-reader/reader.cob",
+     "license": null,
+     "bytes": 3424,
+     "overlap_with_corpus": 0.0,
+     "sha256": "0f427717582c21c187fae9eb46af22ade011d7c21747518e7bc24f85a149fbcd"
+    },
+    {
+     "repo": "web4hub/Cobol",
+     "created_at": "2026-09-27T15:11:45Z",
+     "commit": "eedae4e320a4b2d0c44abb2c3061091321648fb7",
+     "path": "test/testfiles/TEST_LVL_88.cbl",
+     "license": "GPL-3.0",
+     "bytes": 3074,
+     "overlap_with_corpus": 0.0,
+     "sha256": "33d8b6d31ed5b8a4dcded7de1e195503647083d4853dd3c08916a9c87cb6af3b"
+    },
+    {
+     "repo": "web4hub/Cobol",
+     "created_at": "2026-09-27T15:11:45Z",
+     "commit": "eedae4e320a4b2d0c44abb2c3061091321648fb7",
+     "path": "examples/hello.cbl",
+     "license": "GPL-3.0",
+     "bytes": 3064,
+     "overlap_with_corpus": 0.0,
+     "sha256": "1436ff5a4fb00a7593d57be3d8ebcb12b603429e93bcb1568196e627a7c7222f"
+    },
+    {
+     "repo": "web4hub/Cobol",
+     "created_at": "2026-09-27T15:11:45Z",
+     "commit": "eedae4e320a4b2d0c44abb2c3061091321648fb7",
+     "path": "test/testfiles/TEST-PRINTER.cbl",
+     "license": "GPL-3.0",
+     "bytes": 2152,
+     "overlap_with_corpus": 0.0,
+     "sha256": "b61f4aa1fd982238c3d92fdd7179131f618ba096ba681bd5e46308e4d2751c8f"
+    },
+    {
+     "repo": "victorgomesinfor/AprendendoCOBOL",
+     "created_at": "2026-09-27T12:00:00Z",
+     "commit": "db739b644c1404142987cd6d6b7bd04ecc3214cc",
+     "path": "Aula002/PequenoCalculo.cob",
+     "license": null,
+     "bytes": 1776,
+     "overlap_with_corpus": 0.0,
+     "sha256": "f3908557cf3bb7d46237b44bcb18e724095e0fe47e6feecb63098170c4e0c85d"
+    },
+    {
+     "repo": "aymarafusaro/patrones-cobol-mainframe",
+     "created_at": "2026-09-24T14:25:51Z",
+     "commit": "459b8343d58e637191a089fe2c3ca4a6509ecc8d",
+     "path": "lecciones/02-corte-control/CORTE-CONTROL.CBL",
+     "license": null,
+     "bytes": 14131,
+     "overlap_with_corpus": 0.0041,
+     "sha256": "99c33c3437fa1504d4a6b7de23d2946159d9acdc9ed74bc5c8a77f5b8bcbc500"
+    },
+    {
+     "repo": "aymarafusaro/patrones-cobol-mainframe",
+     "created_at": "2026-09-24T14:25:51Z",
+     "commit": "459b8343d58e637191a089fe2c3ca4a6509ecc8d",
+     "path": "lecciones/01-abm/ABM-CLIENTES.CBL",
+     "license": null,
+     "bytes": 12809,
+     "overlap_with_corpus": 0.0,
+     "sha256": "25337a619147f3817c0e39c3dcbc1030b0d35e1e4b35b375d8edfc26502819ab"
+    },
+    {
+     "repo": "aymarafusaro/patrones-cobol-mainframe",
+     "created_at": "2026-09-24T14:25:51Z",
+     "commit": "459b8343d58e637191a089fe2c3ca4a6509ecc8d",
+     "path": "lecciones/03-apareo-archivos/APAREO-ARCHIVOS.CBL",
+     "license": null,
+     "bytes": 11220,
+     "overlap_with_corpus": 0.0046,
+     "sha256": "017b1b876c3a0a5356de28dffe870acec288a9777c040bc53e8b063e9e66a216"
+    },
+    {
+     "repo": "RoySpino/Cobol-Mandelbrot-PPM-Imager",
+     "created_at": "2026-09-24T18:13:00Z",
+     "commit": "7764553d9086740b85f284584eaa75489eeb390a",
+     "path": "Archive/mSet_20260925.cob",
+     "license": "MIT",
+     "bytes": 10684,
+     "overlap_with_corpus": 0.0,
+     "sha256": "bd880c717be640679646af7f35a2eed817a2bafe5af999cad8bccfcd89e13b0a"
+    },
+    {
+     "repo": "matrixwhisper/legacy-code-agent",
+     "created_at": "2026-09-26T10:47:42Z",
+     "commit": "60cad06fee5760a2f995461cf3915ba6f81f7d82",
+     "path": "src/program_task01.cbl",
+     "license": null,
+     "bytes": 9379,
+     "overlap_with_corpus": 0.0,
+     "sha256": "db25b933bc72b0de57eb1b86834dae0fc35fa188ba72d03998547e9bac78d323"
+    },
+    {
+     "repo": "Davter17/Cobol",
+     "created_at": "2026-09-26T09:25:01Z",
+     "commit": "e509fa2f4e52ce3f08fa40843be5a82202f28233",
+     "path": "cobol/EXAMPLE2.cob",
+     "license": null,
+     "bytes": 869,
+     "overlap_with_corpus": 0.0,
+     "sha256": "30f0cfd33d22246f3f6405fb983c1218c9f11424c49b329efe276d644f0a1196"
+    },
+    {
+     "repo": "hackTheCosmos/cobol",
+     "created_at": "2026-09-03T13:37:57Z",
+     "commit": "1464840d40e68cd32fc7f8dbaa1e1c2988dbbbac",
+     "path": "conditions/mention-note-booleans.cob",
+     "license": null,
+     "bytes": 1775,
+     "overlap_with_corpus": 0.0237,
+     "sha256": "877ff86d9db74e5d4b557ed94c2ae75c49716c0e1f4a793f9120dc2e0db88d69"
+    },
+    {
+     "repo": "hackTheCosmos/cobol",
+     "created_at": "2026-09-03T13:37:57Z",
+     "commit": "1464840d40e68cd32fc7f8dbaa1e1c2988dbbbac",
+     "path": "tp/tp.cob",
+     "license": null,
+     "bytes": 1619,
+     "overlap_with_corpus": 0.0,
+     "sha256": "fec3eb65a8ebe2ea925dfb5e8dbb0012897fbd3883aed4cd89cc734013401ca4"
+    },
+    {
+     "repo": "hackTheCosmos/cobol",
+     "created_at": "2026-09-03T13:37:57Z",
+     "commit": "1464840d40e68cd32fc7f8dbaa1e1c2988dbbbac",
+     "path": "conditions/condition-avec-paragraphe.cob",
+     "license": null,
+     "bytes": 1233,
+     "overlap_with_corpus": 0.0,
+     "sha256": "8901a41c346829655d5dbee4e433ba142890ac026f4d9494bd5cf61e14d9adf8"
+    },
+    {
+     "repo": "WolfShaddows/ECO-MAIN-COBOL-Granite",
+     "created_at": "2026-09-25T09:39:37Z",
+     "commit": "060f284a527ac3e278fea62f724e7e873ef76cd0",
+     "path": "core-cobol/ECO-GATE.cbl",
+     "license": "NOASSERTION",
+     "bytes": 5387,
+     "overlap_with_corpus": 0.0108,
+     "sha256": "53ac2e1b0d421373e0359bc0d8bb0f68cd844a73bbef0e2735840dbb0ab5c394"
+    },
+    {
+     "repo": "WolfShaddows/ECO-MAIN-COBOL-Granite",
+     "created_at": "2026-09-25T09:39:37Z",
+     "commit": "060f284a527ac3e278fea62f724e7e873ef76cd0",
+     "path": "core-cobol/MODEL-BENCH.cbl",
+     "license": "NOASSERTION",
+     "bytes": 3027,
+     "overlap_with_corpus": 0.0034,
+     "sha256": "2a967e5af9a9df029db627258de7375bc84a0384f9caf7e1b11697ccc98097c2"
+    },
+    {
+     "repo": "iibilu/Exercices-COBOL",
+     "created_at": "2026-09-25T13:05:41Z",
+     "commit": "be37d27a8954ce567443c8d4a7dc6b45c78b7da9",
+     "path": "Video-club/VIDEO-CLUB.cbl",
+     "license": null,
+     "bytes": 12065,
+     "overlap_with_corpus": 0.0012,
+     "sha256": "2ad86121c26a5394576cc1cfddfab5a1ab306092d37fc65c964ef3677bb390d7"
+    },
+    {
+     "repo": "iibilu/Exercices-COBOL",
+     "created_at": "2026-09-25T13:05:41Z",
+     "commit": "be37d27a8954ce567443c8d4a7dc6b45c78b7da9",
+     "path": "Jeu-pendu/JEU-PENDU.cbl",
+     "license": null,
+     "bytes": 11397,
+     "overlap_with_corpus": 0.0,
+     "sha256": "eb19a6ed2b53372622956dbfe5bd0a4ffb1edbf1d37642aa416d11da75dc80c3"
+    },
+    {
+     "repo": "iibilu/Exercices-COBOL",
+     "created_at": "2026-09-25T13:05:41Z",
+     "commit": "be37d27a8954ce567443c8d4a7dc6b45c78b7da9",
+     "path": "Livret/BILAN-LIVRET.cbl",
+     "license": null,
+     "bytes": 5761,
+     "overlap_with_corpus": 0.0,
+     "sha256": "70868195136a697b0815af47753dd40886d2c4eece7e1c962d0a7a2bebe44e2c"
+    },
+    {
+     "repo": "enricomalta/legacy-bank-DOMO",
+     "created_at": "2026-09-24T16:28:01Z",
+     "commit": "35313abdc649653261905815112c0806d19821e6",
+     "path": "cobol/WITHDRAW_DB2.CBL",
+     "license": null,
+     "bytes": 1741,
+     "overlap_with_corpus": 0.0,
+     "sha256": "25a0d536c6f6a627e07c70dd5234d036c3b31985de5d0ed9e6f0597f1ab036f3"
+    },
+    {
+     "repo": "enricomalta/legacy-bank-DOMO",
+     "created_at": "2026-09-24T16:28:01Z",
+     "commit": "35313abdc649653261905815112c0806d19821e6",
+     "path": "cobol/ACCOUNT.CBL",
+     "license": null,
+     "bytes": 1385,
+     "overlap_with_corpus": 0.0,
+     "sha256": "822bc663a49a3ddb4836b0c2f8d7c8e880a3dbaa7ee493addb83102f053c8fb1"
+    },
+    {
+     "repo": "enricomalta/legacy-bank-DOMO",
+     "created_at": "2026-09-24T16:28:01Z",
+     "commit": "35313abdc649653261905815112c0806d19821e6",
+     "path": "cobol/ACCOUNT_DB2.CBL",
+     "license": null,
+     "bytes": 1089,
+     "overlap_with_corpus": 0.0,
+     "sha256": "47108ebf1ee493b56cb263aa52fa18ef9011d074655c2286c500024cf15eb8f8"
+    }
+   ]
+  },
+  "code_new": {
+   "docs": 32,
+   "bytes": 596446,
+   "filter": "Python/Java/JavaScript/Go/C, repositories created after 2026-08-01 with >=5 stars, no forks, <=2 files of <=25,000 bytes per repository; NOT checked against our corpus (no longer on disk): files copied from older projects may remain",
+   "files": [
+    {
+     "repo": "Achref23illi/ui-craft",
+     "created_at": "2026-09-16T03:25:48Z",
+     "commit": "ecee767b007189d5d2866f4d4cebb2fb0d6df6bf",
+     "path": "scripts/refs.py",
+     "language": "Python",
+     "license": "MIT",
+     "bytes": 15622,
+     "sha256": "d8a2e2675775035722ca24f4c0a6427e778736a37c85645814bcea9bab84fbaf"
+    },
+    {
+     "repo": "Achref23illi/ui-craft",
+     "created_at": "2026-09-16T03:25:48Z",
+     "commit": "ecee767b007189d5d2866f4d4cebb2fb0d6df6bf",
+     "path": "scripts/measure.py",
+     "language": "Python",
+     "license": "MIT",
+     "bytes": 5119,
+     "sha256": "0710f6968152e7133ad4c8eaaa64382d45f9fae532c9c9cedf84d26a312a1fa9"
+    },
+    {
+     "repo": "converge-ai-labs/agent-foundation",
+     "created_at": "2026-08-18T12:44:56Z",
+     "commit": "5d85da03d6d03832475caad4d0d8bc14ab2b6750",
+     "path": "packages/a13n-service/tests/test_memories.py",
+     "language": "Python",
+     "license": "Apache-2.0",
+     "bytes": 24721,
+     "sha256": "78b8c2f093f7e99d58bfca65ad55cd6425b9d5d2f9bd1140114475add3c472db"
+    },
+    {
+     "repo": "converge-ai-labs/agent-foundation",
+     "created_at": "2026-08-18T12:44:56Z",
+     "commit": "5d85da03d6d03832475caad4d0d8bc14ab2b6750",
+     "path": "dev/observation-demo/agent.py",
+     "language": "Python",
+     "license": "Apache-2.0",
+     "bytes": 24583,
+     "sha256": "b3dd34ac9673b227f3a5c0551b1c5681dc4136ae397abe88c746833ae7775cfd"
+    },
+    {
+     "repo": "tgeczy/ssi263-speech",
+     "created_at": "2026-09-25T20:22:30Z",
+     "commit": "5b827c03634db7d029f736d88d932ef66101e7e2",
+     "path": "nvda/accent/synthDrivers/accentmini.py",
+     "language": "Python",
+     "license": "MIT",
+     "bytes": 23936,
+     "sha256": "a8954b6252e14d03fc25055b0143d1fb10416b7917550c8fdbb9720d9aa1d586"
+    },
+    {
+     "repo": "tgeczy/ssi263-speech",
+     "created_at": "2026-09-25T20:22:30Z",
+     "commit": "5b827c03634db7d029f736d88d932ef66101e7e2",
+     "path": "nvda/tools/run_tests.py",
+     "language": "Python",
+     "license": "MIT",
+     "bytes": 23256,
+     "sha256": "056564ebcde8c443d77b872decd5e4852485ad9d50cc9545633e943a789d667d"
+    },
+    {
+     "repo": "migman1983/ED_ITM",
+     "created_at": "2026-08-11T03:09:44Z",
+     "commit": "4ef398cecf8e7082f66d0709c16e7876a79e6a4d",
+     "path": "Archivos/DemostracionArchivos/Demostracion.java",
+     "language": "Java",
+     "license": null,
+     "bytes": 12523,
+     "sha256": "17af168327ac0ec7104182303db537f08e7648c9b828db0617add5e0bf83855f"
+    },
+    {
+     "repo": "migman1983/ED_ITM",
+     "created_at": "2026-08-11T03:09:44Z",
+     "commit": "4ef398cecf8e7082f66d0709c16e7876a79e6a4d",
+     "path": "Archivos/PrEstudiante/Java/Menu.java",
+     "language": "Java",
+     "license": null,
+     "bytes": 10068,
+     "sha256": "a8dd74042500c7e6657e20518df7e57e1ea08793665330d314606b3fa1c2f1d7"
+    },
+    {
+     "repo": "e-m-wilson/java-fs",
+     "created_at": "2026-08-25T19:01:36Z",
+     "commit": "4053201128cdba62f559bf21940d2c5cc42d13d7",
+     "path": "Week_4/cleancodeWithJDBC/src/main/java/com/cleancode/persistence/StudentDAOImpl.java",
+     "language": "Java",
+     "license": null,
+     "bytes": 4937,
+     "sha256": "25e852f1a19ac613dee7f6e7d05ea13c420348ebbe65f3b879e6341c23c67da2"
+    },
+    {
+     "repo": "e-m-wilson/java-fs",
+     "created_at": "2026-08-25T19:01:36Z",
+     "commit": "4053201128cdba62f559bf21940d2c5cc42d13d7",
+     "path": "Week_4/InMemoryJunitExample.java",
+     "language": "Java",
+     "license": null,
+     "bytes": 4760,
+     "sha256": "4ac783fa9be63d12c5bc8ebb8fecb9a6169889cbf2569bffaf4ccd2ebd11c128"
+    },
+    {
+     "repo": "exteraless/exteraless",
+     "created_at": "2026-08-16T12:38:22Z",
+     "commit": "2587d6c15b8ff31543c7c8a062ed35a8494933a4",
+     "path": "TMessagesProj/src/main/java/org/telegram/ui/Components/FilterGLThread.java",
+     "language": "Java",
+     "license": "GPL-3.0",
+     "bytes": 24955,
+     "sha256": "8945da849c41ef3962ee445bc7a1f45849db77eb80d5bd29d2d6d736af0e3ca8"
+    },
+    {
+     "repo": "exteraless/exteraless",
+     "created_at": "2026-08-16T12:38:22Z",
+     "commit": "2587d6c15b8ff31543c7c8a062ed35a8494933a4",
+     "path": "TMessagesProj/src/main/java/org/telegram/ui/Charts/StackLinearChartView.java",
+     "language": "Java",
+     "license": "GPL-3.0",
+     "bytes": 24754,
+     "sha256": "abea7ef751ada6c9e670f83dee46850c481621f79623ee4b53043f6a9c0714c7"
+    },
+    {
+     "repo": "NullCoreDeveloper/NullcoreGram",
+     "created_at": "2026-08-15T17:58:19Z",
+     "commit": "cd0ba2ee2ecd419e52d0333b8260eb4389b88936",
+     "path": "TMessagesProj/src/main/java/com/google/android/exoplayer2/drm/DefaultDrmSession.java",
+     "language": "Java",
+     "license": "GPL-3.0",
+     "bytes": 24986,
+     "sha256": "7275672af2236706f16fec24dc9678a14c252a9687d3fa92c09d9fc47ea36052"
+    },
+    {
+     "repo": "NullCoreDeveloper/NullcoreGram",
+     "created_at": "2026-08-15T17:58:19Z",
+     "commit": "cd0ba2ee2ecd419e52d0333b8260eb4389b88936",
+     "path": "TMessagesProj/src/main/java/tw/nekomimi/nekogram/settings/NekoHiddenAccountsSettingsActivity.java",
+     "language": "Java",
+     "license": "GPL-3.0",
+     "bytes": 24961,
+     "sha256": "5339bee45d0dda943617c3b94787c48214e1fd7e9a49fc76584fa8a5054d0374"
+    },
+    {
+     "repo": "xiaolongbao0709/ai-virtual-phone-share",
+     "created_at": "2026-08-10T10:32:48Z",
+     "commit": "051e71d5da04e1fc2ff38d1896d2712262010afa",
+     "path": "资源/应用/一刻清单/focus-notes-floating-plugin.js",
+     "language": "JavaScript",
+     "license": null,
+     "bytes": 22033,
+     "sha256": "3d05d863f1a5eafa868e0693aaa9a73c3313c2bc9a3404c740c1e2050fe20fc3"
+    },
+    {
+     "repo": "xiaolongbao0709/ai-virtual-phone-share",
+     "created_at": "2026-08-10T10:32:48Z",
+     "commit": "051e71d5da04e1fc2ff38d1896d2712262010afa",
+     "path": "资源/Js插件/画中画悬浮聊天小窗/画中画悬浮聊天小窗_小手机插件 (2).js",
+     "language": "JavaScript",
+     "license": null,
+     "bytes": 21214,
+     "sha256": "269a1934d0edfccccd7942c1f8e138ae506c7811a5f43517494805f74e6e7fba"
+    },
+    {
+     "repo": "tfrere/fontmap",
+     "created_at": "2026-08-06T17:23:21Z",
+     "commit": "373989af69ab578dddc0aca69a549eb23ea1080b",
+     "path": "trailer/src/player-timeline.js",
+     "language": "JavaScript",
+     "license": "MIT",
+     "bytes": 24059,
+     "sha256": "ae933ddd330c4eb40f122a5ce93e7f6435985a7844c2ddb82e5b8b94c336e047"
+    },
+    {
+     "repo": "tfrere/fontmap",
+     "created_at": "2026-08-06T17:23:21Z",
+     "commit": "373989af69ab578dddc0aca69a549eb23ea1080b",
+     "path": "src/components/FontMap/components/ActiveFont.js",
+     "language": "JavaScript",
+     "license": "MIT",
+     "bytes": 21615,
+     "sha256": "fe79855bbc3dd0dd2c97c9f94eb748f673110a1c706f64079f039e4c5c53823e"
+    },
+    {
+     "repo": "Lucifer-St/lucifer-novelai-fx",
+     "created_at": "2026-09-24T16:50:15Z",
+     "commit": "3c43294d8e8bb1a96601cf995c3315ee73b35911",
+     "path": "src/hooks/useComparisons.js",
+     "language": "JavaScript",
+     "license": "MIT",
+     "bytes": 5741,
+     "sha256": "908c4e3313e632b56ab141653a109bf3b57edb10a73617a521380c3c0c7e4a84"
+    },
+    {
+     "repo": "Lucifer-St/lucifer-novelai-fx",
+     "created_at": "2026-09-24T16:50:15Z",
+     "commit": "3c43294d8e8bb1a96601cf995c3315ee73b35911",
+     "path": "src/hooks/usePanelLayout.js",
+     "language": "JavaScript",
+     "license": "MIT",
+     "bytes": 4697,
+     "sha256": "25cb2d24992f9869eec08dc033f155ca604b77291d6590b744dd4c67aa29ed0e"
+    },
+    {
+     "repo": "OpenBatteryInformation/openbatteryinformation.github.io",
+     "created_at": "2026-08-15T19:20:18Z",
+     "commit": "91e552cb232fda7e3462793a6135ee39ec04fcad",
+     "path": "firmware/uploader.js",
+     "language": "JavaScript",
+     "license": "GPL-3.0",
+     "bytes": 14868,
+     "sha256": "bafe0dd83da69772c069a45e1377b850ea073c1a42e2cbf9b061d2e7ca796255"
+    },
+    {
+     "repo": "openshift-online/hypershell",
+     "created_at": "2026-08-03T15:01:12Z",
+     "commit": "f30221b80ef1c7abb1180d5f64d602ecf758e18c",
+     "path": "components/api-server/pkg/rbac/control_plane_identity_test.go",
+     "language": "Go",
+     "license": "Apache-2.0",
+     "bytes": 23716,
+     "sha256": "2e939769c488a30db2586b5fe2d8667131967155c3e2295182f3ebf5f5958d56"
+    },
+    {
+     "repo": "openshift-online/hypershell",
+     "created_at": "2026-08-03T15:01:12Z",
+     "commit": "f30221b80ef1c7abb1180d5f64d602ecf758e18c",
+     "path": "scripts/openapi-ir/normalize.go",
+     "language": "Go",
+     "license": "Apache-2.0",
+     "bytes": 23390,
+     "sha256": "45133957b08dad66cd7e2d53c21a3289f628e7516f2b51ee3b6866eeb505067e"
+    },
+    {
+     "repo": "FreePeak/xdev",
+     "created_at": "2026-09-09T03:13:31Z",
+     "commit": "c8938ca6db6f018346113954d2f879ab8ae67774",
+     "path": "internal/memory/mnemopi_test.go",
+     "language": "Go",
+     "license": "Apache-2.0",
+     "bytes": 24798,
+     "sha256": "68100197764b7fbcf27b926f6b8d7f01b86b5514bc457e26fce21689588d41b9"
+    },
+    {
+     "repo": "FreePeak/xdev",
+     "created_at": "2026-09-09T03:13:31Z",
+     "commit": "c8938ca6db6f018346113954d2f879ab8ae67774",
+     "path": "internal/tool/edit.go",
+     "language": "Go",
+     "license": "Apache-2.0",
+     "bytes": 24065,
+     "sha256": "4077d331f83504ec064775b11d0487269f56a549ae5db44795c1c99bfd9231fc"
+    },
+    {
+     "repo": "yetone/magpie",
+     "created_at": "2026-09-23T16:22:35Z",
+     "commit": "424ff31a469f24617ea12984d99bdae6c32e6a7e",
+     "path": "internal/provider/logins.go",
+     "language": "Go",
+     "license": "MIT",
+     "bytes": 24841,
+     "sha256": "7d7b7c8f4f7313ffa030aabe8748251663020c58e9efbe3500648fbb711e1c3f"
+    },
+    {
+     "repo": "zzzxxxxxxxxxx/GhostLock-GOT-W29",
+     "created_at": "2026-08-10T09:01:08Z",
+     "commit": "e5f6e34da8f73b4037389aeaa363c24ee0fb1255",
+     "path": "exploit/ghostlock-source/src/slide.c",
+     "language": "C",
+     "license": null,
+     "bytes": 22760,
+     "sha256": "25e4f73c4156eb0436c2d3a816bb47507da39de221470af804ab48adcd753258"
+    },
+    {
+     "repo": "zzzxxxxxxxxxx/GhostLock-GOT-W29",
+     "created_at": "2026-08-10T09:01:08Z",
+     "commit": "e5f6e34da8f73b4037389aeaa363c24ee0fb1255",
+     "path": "exploit/ghostlock-source/src/util.c",
+     "language": "C",
+     "license": null,
+     "bytes": 7563,
+     "sha256": "48835030f594dfc925daef14b7c0677993cd5c70968e6a439e83458e2887fef5"
+    },
+    {
+     "repo": "Droid-Deck/DroidDeck",
+     "created_at": "2026-09-24T15:14:13Z",
+     "commit": "c729f4c8e777b99e883f30260d72b50ad48c4e0d",
+     "path": "app/src/main/cpp/waylandcomp/src/wl_clipboard.c",
+     "language": "C",
+     "license": "GPL-3.0",
+     "bytes": 22187,
+     "sha256": "5828861f6c985ccb3f12d996cd55d5ef40169efbbecc15fef3979539c51eb2c9"
+    },
+    {
+     "repo": "Droid-Deck/DroidDeck",
+     "created_at": "2026-09-24T15:14:13Z",
+     "commit": "c729f4c8e777b99e883f30260d72b50ad48c4e0d",
+     "path": "app/src/main/cpp/waylandcomp/src/framegen_bridge.c",
+     "language": "C",
+     "license": "GPL-3.0",
+     "bytes": 21051,
+     "sha256": "6531199ab951288dd27c7c553e372a5fe0b9d2db9ac332f590305c5dc5511c4c"
+    },
+    {
+     "repo": "edde746/mpv-build",
+     "created_at": "2026-09-01T09:49:12Z",
+     "commit": "0a76578445a0908c100ea985f4bd4cf0b21f9ca9",
+     "path": "scripts/test_mediacodec_shed.c",
+     "language": "C",
+     "license": "GPL-3.0",
+     "bytes": 19701,
+     "sha256": "f5eeffa1400feb1f9e16debfd6242fddc7c1ac1d54ea59f0f8a91b87319a5bd5"
+    },
+    {
+     "repo": "edde746/mpv-build",
+     "created_at": "2026-09-01T09:49:12Z",
+     "commit": "0a76578445a0908c100ea985f4bd4cf0b21f9ca9",
+     "path": "scripts/test_avf_timebase_servo.c",
+     "language": "C",
+     "license": "GPL-3.0",
+     "bytes": 18966,
+     "sha256": "1e2d980c5c5d7019b9a839bdff77a4b9bc08795658fdddea4e24db0af99c7b4e"
+    }
+   ]
+  },
+  "it_new": {
+   "docs": 76,
+   "bytes": 433036,
+   "filter": "it.wikipedia articles created in the 30 days before built_at, >=3,000 characters, no disambiguation or list pages",
+   "pages": [
+    {
+     "title": "Aramis Gianinazzi",
+     "pageid": 11223408,
+     "created_at": "2026-09-30T14:42:31Z",
+     "bytes": 5903,
+     "sha256": "bbe982e023210dfdc1c5bc50e79bbddb5545b3ad442e697bf14b3258c2462b37"
+    },
+    {
+     "title": "Bertramka",
+     "pageid": 11223150,
+     "created_at": "2026-09-30T12:24:08Z",
+     "bytes": 8723,
+     "sha256": "772f931e9a60b19913ddd06d3438ce78d15e200c3b5dbd39ce2054e21eac03b6"
+    },
+    {
+     "title": "Alessio Delle Vedove",
+     "pageid": 11221501,
+     "created_at": "2026-09-29T07:00:35Z",
+     "bytes": 3426,
+     "sha256": "a8f888c2458cc93361a92a29fb4329b5f713e4360aab678613c338688dff650c"
+    },
+    {
+     "title": "Altishahr",
+     "pageid": 11220778,
+     "created_at": "2026-09-28T14:09:08Z",
+     "bytes": 7774,
+     "sha256": "bba394fbadd313e4018b7573fbc99fa1368305f994eb158dad59115a2e36b73f"
+    },
+    {
+     "title": "Andreas Onea",
+     "pageid": 11220548,
+     "created_at": "2026-09-28T11:29:34Z",
+     "bytes": 3867,
+     "sha256": "85d7d6ec67fcf3cbe4cf37b0d9d7eedb3ec73133d2b231aa05f711496bb69c11"
+    },
+    {
+     "title": "Caravaggio (film 2026)",
+     "pageid": 11220410,
+     "created_at": "2026-09-28T09:32:26Z",
+     "bytes": 3810,
+     "sha256": "e7daba516906f15520d0474477ed8429fa0406a149c67770804640ea08ff63ab"
+    },
+    {
+     "title": "Alex Tapscott",
+     "pageid": 11219924,
+     "created_at": "2026-09-27T20:51:02Z",
+     "bytes": 3092,
+     "sha256": "1ffeabb08845dc0da56647f72590612811364525ad76ed8f5337f3c168edbe5e"
+    },
+    {
+     "title": "Andrew Paulson",
+     "pageid": 11219746,
+     "created_at": "2026-09-27T17:54:11Z",
+     "bytes": 4213,
+     "sha256": "1433b81d613c188bbc009a6ca3604ae75e00e49b13c738eb6cc54339b0f4f774"
+    },
+    {
+     "title": "Enea Della Balda",
+     "pageid": 11218706,
+     "created_at": "2026-09-26T20:37:21Z",
+     "bytes": 3429,
+     "sha256": "d5ad52b46f1167dcf1bc6b53b9b5d037db7c0b815b967743508ceefc3110a471"
+    },
+    {
+     "title": "(612533) 2002 XV93",
+     "pageid": 11218141,
+     "created_at": "2026-09-26T12:22:46Z",
+     "bytes": 15719,
+     "sha256": "52e3d03d6724b8cddd390cba147632326aca8d4507d1760e04d9d418b0bf565f"
+    },
+    {
+     "title": "Adrian Lickūnas",
+     "pageid": 11217278,
+     "created_at": "2026-09-25T19:22:52Z",
+     "bytes": 4126,
+     "sha256": "27127b9a5d2aef438d6ae241c3beef913eef967d7e05bc127860708b906f92e4"
+    },
+    {
+     "title": "Adriano Di Leo",
+     "pageid": 11216767,
+     "created_at": "2026-09-25T12:26:15Z",
+     "bytes": 4243,
+     "sha256": "eaf53185ae36542ced835daa7e5bd1411f1f66b1b2c617cf553facf23c7e6bdc"
+    },
+    {
+     "title": "Atanasio I Manasse",
+     "pageid": 11216690,
+     "created_at": "2026-09-25T11:34:29Z",
+     "bytes": 10823,
+     "sha256": "e90289aba30593be9f099d5c0cab392e4525acd883dd6714990e5ed15f6fec94"
+    },
+    {
+     "title": "A Sun",
+     "pageid": 11216076,
+     "created_at": "2026-09-24T19:18:15Z",
+     "bytes": 5716,
+     "sha256": "8f48bee0fbbcf4b6d740d6f5de4bf781631a9ee43e58893769830e05f099d14d"
+    },
+    {
+     "title": "Amedeo Panella",
+     "pageid": 11214656,
+     "created_at": "2026-09-23T14:24:09Z",
+     "bytes": 7633,
+     "sha256": "dc19b2c75fedeb780128a2194593329c5afa3f943c5e5034885dd4f246103b09"
+    },
+    {
+     "title": "Arkanoid DS",
+     "pageid": 11213651,
+     "created_at": "2026-09-22T18:07:43Z",
+     "bytes": 3836,
+     "sha256": "2d97f4dab44cd65ffbf2f276a26364ba2c970409f0b51ec11e18cedbe66aa7f6"
+    },
+    {
+     "title": "Alberto Prandoni",
+     "pageid": 11213085,
+     "created_at": "2026-09-22T09:40:39Z",
+     "bytes": 3225,
+     "sha256": "ca88aec30804ff019dc59cb1eda5718a0564b78b4ba3e53e2539f8b6e66eb5f2"
+    },
+    {
+     "title": "Assedio di Longwy",
+     "pageid": 11213044,
+     "created_at": "2026-09-22T09:01:50Z",
+     "bytes": 4656,
+     "sha256": "93c2a7e7e5aceefbd5fd792cf2b9fad38ae6f8b5628cbe0c63b424a448ae5c01"
+    },
+    {
+     "title": "(523671) 2013 FZ27",
+     "pageid": 11212712,
+     "created_at": "2026-09-21T21:46:27Z",
+     "bytes": 4035,
+     "sha256": "b69809abbfb4f80ea5b65561788ab0f34f10b15fb0996196bf182ac1dac4e2fe"
+    },
+    {
+     "title": "Analista finanziario",
+     "pageid": 11211892,
+     "created_at": "2026-09-21T10:28:49Z",
+     "bytes": 5771,
+     "sha256": "5d3ab76ea1142309b44f9b0c029596831428c5646b4802f8e1a087980a8dc2fd"
+    },
+    {
+     "title": "Beach Bocce",
+     "pageid": 11211799,
+     "created_at": "2026-09-21T09:14:47Z",
+     "bytes": 8192,
+     "sha256": "4534a165fc55a28bfcd1ec46c866bde07aadc94156b3f9f8b5a5087cdb6b854f"
+    },
+    {
+     "title": "(574372) 2010 JO179",
+     "pageid": 11211514,
+     "created_at": "2026-09-21T01:09:33Z",
+     "bytes": 3156,
+     "sha256": "765f140a79cb4504a8e0ec8917251ba121d5ca6917ec1ffb0ab8aac60bf2235c"
+    },
+    {
+     "title": "(523692) 2014 EZ51",
+     "pageid": 11211137,
+     "created_at": "2026-09-20T18:52:09Z",
+     "bytes": 3354,
+     "sha256": "f8c77a4524520724f81509630b7e55d2d525b4f1160c1ac97f83f552e60e46c5"
+    },
+    {
+     "title": "Achille Mortara",
+     "pageid": 11210702,
+     "created_at": "2026-09-20T13:18:08Z",
+     "bytes": 4924,
+     "sha256": "55e47972410cd5629bf263ffeaeaebada9fd28ce0628bfa4aaccb6576e751678"
+    },
+    {
+     "title": "(523794) 2015 RR245",
+     "pageid": 11210328,
+     "created_at": "2026-09-20T08:14:11Z",
+     "bytes": 4150,
+     "sha256": "c8824d88f0c787b8f02515a2951fe1433fa75de8bf5a4b73e003d58c51350035"
+    },
+    {
+     "title": "35º Congresso degli Stati Uniti d'America",
+     "pageid": 11209656,
+     "created_at": "2026-09-19T16:00:41Z",
+     "bytes": 3470,
+     "sha256": "d471a2f140afd32b1c61e965a745e65686085c5456537739727a3a1f81d67418"
+    },
+    {
+     "title": "Anny Schlemm",
+     "pageid": 11209423,
+     "created_at": "2026-09-19T12:54:50Z",
+     "bytes": 3636,
+     "sha256": "1e5658778d2032d65bc74765c78a825f9f6e698d26f12b897e12c500ff6c1120"
+    },
+    {
+     "title": "Acusilas tongi",
+     "pageid": 11208954,
+     "created_at": "2026-09-19T06:20:17Z",
+     "bytes": 3608,
+     "sha256": "f993fbf258868f092258a2111293188b4b77e501ca8181697e705824b63c2931"
+    },
+    {
+     "title": "Albergo della Regina Isabella",
+     "pageid": 11208601,
+     "created_at": "2026-09-18T19:23:15Z",
+     "bytes": 4755,
+     "sha256": "b29d349cf23468b8c803b45a6998bd557400aba15b9dca102b1399ce3ea9c990"
+    },
+    {
+     "title": "Ayako Suzuki (parabadminton)",
+     "pageid": 11207815,
+     "created_at": "2026-09-18T08:38:59Z",
+     "bytes": 5231,
+     "sha256": "9c3b6d52d8fdafdd16f1055463653a306fefb1ac3558ef1d410c43af7f948c11"
+    },
+    {
+     "title": "Alepisaurus brevirostris",
+     "pageid": 11207563,
+     "created_at": "2026-09-17T22:58:54Z",
+     "bytes": 8844,
+     "sha256": "a6d0a91f508c9f193648603c30add21d0c68b7e0412fa9519eac629b43875542"
+    },
+    {
+     "title": "Barbara Shermund",
+     "pageid": 11207440,
+     "created_at": "2026-09-17T20:46:20Z",
+     "bytes": 3137,
+     "sha256": "944aacdc7a98db71e27ec8eeca8ec2d4bbd43aab137dc3df671552724d89758b"
+    },
+    {
+     "title": "Abdelkader Djemaï",
+     "pageid": 11207109,
+     "created_at": "2026-09-17T15:57:12Z",
+     "bytes": 7249,
+     "sha256": "16ee401666bf6644b459d3b5e27315e8101c64a6e10511e446067d4e13e28056"
+    },
+    {
+     "title": "Atletica 85 Faenza",
+     "pageid": 11206616,
+     "created_at": "2026-09-17T08:41:19Z",
+     "bytes": 7377,
+     "sha256": "ac8f9bb3e0ca9964bed0cd431dbc1b14b94164f8b3a52bf0ac9ef38ffb1b1112"
+    },
+    {
+     "title": "Alluvione di Crotone del 1957",
+     "pageid": 11206411,
+     "created_at": "2026-09-17T03:24:02Z",
+     "bytes": 5769,
+     "sha256": "e3fa83363fbef2b48e3e100a6e8dd9a61af9c595ea87282cffaa12153398a6a0"
+    },
+    {
+     "title": "Augusto Gianfranceschi",
+     "pageid": 11206148,
+     "created_at": "2026-09-16T20:13:20Z",
+     "bytes": 11977,
+     "sha256": "f6c2028618504322d04fc96ec95b7d6092a86ff06d8d7f3a3a7860bfc69556bd"
+    },
+    {
+     "title": "ASEAN Club Championship",
+     "pageid": 11206025,
+     "created_at": "2026-09-16T18:39:48Z",
+     "bytes": 5955,
+     "sha256": "a2aff461d1485dab4e2038873d62ba8c2bea9d88f8ac3da626325de80d5f4497"
+    },
+    {
+     "title": "Ageratum",
+     "pageid": 11205749,
+     "created_at": "2026-09-16T13:53:02Z",
+     "bytes": 8195,
+     "sha256": "bac95d2d362bba7d7859b57b6fcb0b90779244a0e5bfffee4243f53a85ba4b69"
+    },
+    {
+     "title": "Alessio Castellini",
+     "pageid": 11204749,
+     "created_at": "2026-09-15T17:55:01Z",
+     "bytes": 3339,
+     "sha256": "81dbe0d3b0bf3730aef52e5ed17d0011e268db6b44db1ee47f9563b8ada4a695"
+    },
+    {
+     "title": "BL 6 inch Mark VII",
+     "pageid": 11204699,
+     "created_at": "2026-09-15T17:15:23Z",
+     "bytes": 6403,
+     "sha256": "9cc6ec5e443daa53fb5b50518e3c340888fa7ab3225e7ad399c7649526134c46"
+    },
+    {
+     "title": "Amori & incantesimi 2",
+     "pageid": 11204343,
+     "created_at": "2026-09-15T12:51:46Z",
+     "bytes": 7729,
+     "sha256": "b209b5d6e651dd30128d1265c32e66138e207b07efc7352e70e97af397847561"
+    },
+    {
+     "title": "Acritopappus",
+     "pageid": 11203976,
+     "created_at": "2026-09-15T07:03:31Z",
+     "bytes": 7805,
+     "sha256": "85ba50125f5c9732cad18b7818ea3ed7025882e88a4bc81041e3490040b54643"
+    },
+    {
+     "title": "Abbazia di Fontgombault",
+     "pageid": 11203791,
+     "created_at": "2026-09-14T22:54:06Z",
+     "bytes": 9425,
+     "sha256": "6af75a7161375d13c94796dc91714f24d597c449bafafcbd659dfb7fb77704ea"
+    },
+    {
+     "title": "Albert Philipsen",
+     "pageid": 11203033,
+     "created_at": "2026-09-14T11:40:49Z",
+     "bytes": 5664,
+     "sha256": "8ce7ac8d57f188fd3bcf40b92e0518a60cfb8e41c865ef22d895ee3e4b6068f7"
+    },
+    {
+     "title": "Aldo Macario",
+     "pageid": 11202703,
+     "created_at": "2026-09-14T06:37:23Z",
+     "bytes": 3034,
+     "sha256": "28e97fbf70e269aa3f8d1d5ea07a1a63c101b694178a050308807b910bcc6f09"
+    },
+    {
+     "title": "Association Sportive de Monaco Football Club e nazionali di calcio",
+     "pageid": 11202592,
+     "created_at": "2026-09-13T23:32:59Z",
+     "bytes": 18345,
+     "sha256": "41ac158f6a95f66a3f9a807e49893fb2a8aac5197d900e3e1c93b12e2e9ddb52"
+    },
+    {
+     "title": "Borderlands 4",
+     "pageid": 11201729,
+     "created_at": "2026-09-13T11:07:40Z",
+     "bytes": 4915,
+     "sha256": "b55c808147cb448855132f3c0096f1d24dda262c13169796c6940f2cf61da02f"
+    },
+    {
+     "title": "ATP Finals 2026",
+     "pageid": 11199634,
+     "created_at": "2026-09-11T16:36:27Z",
+     "bytes": 5747,
+     "sha256": "f7a421f3fd529cbfcb32907195c3b76fa3cd02bbe933815421a246d7774a4802"
+    },
+    {
+     "title": "Anna Maria Ciucci",
+     "pageid": 11199143,
+     "created_at": "2026-09-11T09:29:36Z",
+     "bytes": 3941,
+     "sha256": "7acf184d80ae5d6a54fa45338036b0dd50943b82610c123a0c6b8e4bdc9071b2"
+    },
+    {
+     "title": "Andrej Pavlovič Petrov",
+     "pageid": 11198504,
+     "created_at": "2026-09-10T18:39:25Z",
+     "bytes": 3597,
+     "sha256": "820a94d72069d5e9601e9308af826ef0653e1d93042476c7d2598cf18a22f661"
+    },
+    {
+     "title": "Albino Cuneo",
+     "pageid": 11198256,
+     "created_at": "2026-09-10T15:08:58Z",
+     "bytes": 3936,
+     "sha256": "161afc643d2cdec6c958fff844c3052c2e1f2addf72aa4f5f30a32fa7f383970"
+    },
+    {
+     "title": "Boso degli Ubertini",
+     "pageid": 11198194,
+     "created_at": "2026-09-10T14:19:19Z",
+     "bytes": 3091,
+     "sha256": "fa3ad4a55b7eb56813f16838f9da5a2401e62791478de677330dda9a02a6e4fe"
+    },
+    {
+     "title": "Adenostemma",
+     "pageid": 11197656,
+     "created_at": "2026-09-10T07:09:46Z",
+     "bytes": 7971,
+     "sha256": "4d89d042207e2ff79ba22b427055566721e2d0355ea1adb1a3bed0a476ee9c7a"
+    },
+    {
+     "title": "Admirable (1691)",
+     "pageid": 11197068,
+     "created_at": "2026-09-09T17:22:58Z",
+     "bytes": 3121,
+     "sha256": "1ec650748e9e15aef4023384f255629988778330f4a5e5bfee94374586cccf50"
+    },
+    {
+     "title": "Admirable (1692)",
+     "pageid": 11197021,
+     "created_at": "2026-09-09T16:51:23Z",
+     "bytes": 3652,
+     "sha256": "e6d4dd3b3065ec4f726ec99bd07d1b7b1eeaca20ca8f0d4ca205943d79e7d3f0"
+    },
+    {
+     "title": "'s-Gravenpolder",
+     "pageid": 11196708,
+     "created_at": "2026-09-09T12:57:31Z",
+     "bytes": 5690,
+     "sha256": "61f618ccba023f2d2acb312359754274ec7fba525360c42d316497370c1e8e98"
+    },
+    {
+     "title": "'s-Heer-Arendskerke",
+     "pageid": 11196540,
+     "created_at": "2026-09-09T10:47:58Z",
+     "bytes": 3992,
+     "sha256": "eea24ff96a75011a879e248fb0d85d9cca772cd893d1fe644535dcee5a10a094"
+    },
+    {
+     "title": "Antonio Galli (politico)",
+     "pageid": 11196337,
+     "created_at": "2026-09-09T07:40:57Z",
+     "bytes": 3180,
+     "sha256": "9f891c2a726a4a367c4f1a7682f46a786545bfaf5e881e75341f206ff30a1cfd"
+    },
+    {
+     "title": "Anatol' Lapo",
+     "pageid": 11195507,
+     "created_at": "2026-09-08T13:33:41Z",
+     "bytes": 3460,
+     "sha256": "0c5e7a5d0ad704dfbd5b6589776003e65d3783af406e335d3a7bc7499dc38927"
+    },
+    {
+     "title": "Candás",
+     "pageid": 11195108,
+     "created_at": "2026-09-08T07:57:33Z",
+     "bytes": 5277,
+     "sha256": "6fd2c929dfef005101e9c9ec9fe94fec63c646cabc18882e809c21d6a245fccc"
+    },
+    {
+     "title": "Changyuraptor",
+     "pageid": 11194728,
+     "created_at": "2026-09-07T20:00:47Z",
+     "bytes": 4650,
+     "sha256": "ee24dc21f27177abe4ce3ab513fd96c8c777ad55e9b8c8881f536a8e9bd34a26"
+    },
+    {
+     "title": "Antonio Riva (boccista)",
+     "pageid": 11194142,
+     "created_at": "2026-09-07T13:16:18Z",
+     "bytes": 4271,
+     "sha256": "23492f67a500ae651cba98c77721c9373012d3942c23cb988222f55296ccbe32"
+    },
+    {
+     "title": "Giuseppe Andreoli (boccista)",
+     "pageid": 11193681,
+     "created_at": "2026-09-07T08:08:04Z",
+     "bytes": 5159,
+     "sha256": "903e34dd5848135682ecbe6f18c6bd1383b57e60629e96c938b64e908a2ce0e6"
+    },
+    {
+     "title": "Adriano Aghem",
+     "pageid": 11193176,
+     "created_at": "2026-09-06T19:16:32Z",
+     "bytes": 3664,
+     "sha256": "948c3b4f265b927a52ef9039b19499d5e9808de219f792164b02a7bcdfd150d3"
+    },
+    {
+     "title": "Andrea Chiapello",
+     "pageid": 11192865,
+     "created_at": "2026-09-06T14:37:52Z",
+     "bytes": 3568,
+     "sha256": "8d24dbc6b42fe0122403ca3c90fe2390734c71dc3ebf074a12fb434508a8e4ca"
+    },
+    {
+     "title": "Africa (divinità)",
+     "pageid": 11192803,
+     "created_at": "2026-09-06T14:00:05Z",
+     "bytes": 3903,
+     "sha256": "3ecc0c51cbce27b84b7786cc9169315413d60737f695f056b91f0fc2ceca1c24"
+    },
+    {
+     "title": "Alessio Cocciolo",
+     "pageid": 11192647,
+     "created_at": "2026-09-06T11:50:06Z",
+     "bytes": 3908,
+     "sha256": "c038dda8ccdae08a21275be1e9fb6f5e2cc35f4dfea166040c91570eba8ee801"
+    },
+    {
+     "title": "Anyphaena",
+     "pageid": 11192415,
+     "created_at": "2026-09-06T08:43:08Z",
+     "bytes": 6146,
+     "sha256": "e1ec32eef7468ca411e4de433c12418bd382700b1d95a5e7d84d72c34353f818"
+    },
+    {
+     "title": "Bernard Derriman",
+     "pageid": 11191671,
+     "created_at": "2026-09-05T14:03:33Z",
+     "bytes": 6157,
+     "sha256": "eb6122cb478d89b78c01b663d11de1f38ebb96074d7f332e8e469cea9055b087"
+    },
+    {
+     "title": "Alexandre (1771)",
+     "pageid": 11190952,
+     "created_at": "2026-09-04T19:33:52Z",
+     "bytes": 5036,
+     "sha256": "22d04b5601636d4f152cf0db135be917759e1980183b1219ca192ed18c4778e7"
+    },
+    {
+     "title": "Aname",
+     "pageid": 11190294,
+     "created_at": "2026-09-04T09:23:26Z",
+     "bytes": 9100,
+     "sha256": "61e76bcf46fc516b61a0fd1d7aeff83318dd0c443e079edb9b336219da3a0794"
+    },
+    {
+     "title": "Alluvioni in Cina",
+     "pageid": 11189993,
+     "created_at": "2026-09-03T23:14:36Z",
+     "bytes": 23248,
+     "sha256": "caa2a5140aa59a4f146460eb5f810307d407e77f37cc5804ac6c188ee11175f8"
+    },
+    {
+     "title": "Andrieslombaardite",
+     "pageid": 11189763,
+     "created_at": "2026-09-03T19:42:07Z",
+     "bytes": 3046,
+     "sha256": "fb0cd379d0afdc5855c379d74c50fcb806ac148f60072b08735869fb3e5b2886"
+    },
+    {
+     "title": "Akinola Davies Jr.",
+     "pageid": 11189472,
+     "created_at": "2026-09-03T15:13:02Z",
+     "bytes": 3028,
+     "sha256": "bdc15713dff6a51e12816dc1bca3f869157238993f9d0e039d9444104be0f5f7"
+    },
+    {
+     "title": "Anne-Catherine de Ligneville",
+     "pageid": 11189198,
+     "created_at": "2026-09-03T12:49:49Z",
+     "bytes": 4186,
+     "sha256": "de0a9163d1cef1e5f12053cf9057cdc0e7796a102baf4640a1bdd135b3e78af6"
+    },
+    {
+     "title": "Alexander Donski",
+     "pageid": 11189105,
+     "created_at": "2026-09-03T11:25:08Z",
+     "bytes": 3653,
+     "sha256": "e8db417ceaac8d35e4b8681038b914fb9131ef9e567cf4c475dae1af82739874"
+    }
+   ]
+  }
+ }
+}

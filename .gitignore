@@ -92,3 +92,6 @@ pip-skylar/
 #  motor-generate — local agent workspace, NOT part of the repo
 # ══════════════════════════════════════════════════
 /motor-generate/
+# Evaluation-set texts are private (our corpus or third parties); only their manifests are public
+eval/postcutoff_bytes/*.txt
+eval/frozen_bytes/*.txt

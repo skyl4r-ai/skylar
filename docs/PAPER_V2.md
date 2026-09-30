@@ -19,8 +19,9 @@ not train at 36, where the embedding leaves its window and the gradient norm at 
 ninefold. Against a dense Transformer with the same components the hybrid does not win on training
 compute at this scale, being slightly ahead at equal tokens and slightly behind at equal time; at 32,768
 tokens, however, it keeps a 3.9 times smaller cache per sequence, and with several long prompts it
-generates 1.9 times as many tokens per second. All measurements are at small scale; no Skylar 2 model
-has yet been trained at the target size.
+generates 1.9 times as many tokens per second. On one B200 the 990M model trains at 53,000 tokens per
+second, and the dense configuration's step is 1.16 times faster than the hybrid's, against 1.24 on an
+RTX 4090. The ablations are at small scale; no Skylar 2 model has yet been trained at the target size.
 
 ## 1. Introduction
 
@@ -60,8 +61,8 @@ variants.
 4. *SiTU-GLU and SwiGLU* are indistinguishable; we keep the bounded SiTU-GLU.
 5. *Hybrid against dense.* With the same components and optimiser, a dense Transformer is
    statistically indistinguishable from the hybrid at equal tokens (bits per byte favour the hybrid by
-   1.6% in every seed) and slightly ahead at equal training time on an RTX 4090 at 8,192 tokens, where
-   its step is 1.24× faster. The hybrid keeps a 3.9 times smaller cache per sequence at 32,768
+   1.6% in every seed) and slightly ahead at equal training time at 8,192 tokens, where its step is
+   1.24× faster on an RTX 4090 and 1.16× faster on a B200. The hybrid keeps a 3.9 times smaller cache per sequence at 32,768
    tokens and, with several long prompts, generates 1.9 times as many tokens per second: it is chosen
    for inference over long inputs, not for training cost.
 6. *Cost.* With the pre-normalisation folded into a fused kernel, block aggregation makes the 990M
@@ -298,6 +299,25 @@ internally at reduced precision, and amplify input differences of $10^{-6}$ to a
 output; with KDA included, the comparison would measure the recurrent kernel rather than the
 aggregation.
 
+### 4.6 Compiled training without checkpointing
+
+The fastest configuration on a B200 trains without activation checkpointing (§6.8), and there
+`torch.compile` traces every block of the model. The first runs on that GPU exposed three problems that
+do not occur with checkpointing, which every training run and training-step measurement on the RTX 4090
+used (we verified that they are free of them). FlexAttention traced into the model's graph ran its unfused reference implementation, which
+materialises the full score matrix (at a micro-batch of four sequences, 171 GiB instead of 152 and
+1.8 times slower); it is now called outside the graph, through its own compiled kernel. The number of
+documents in a batch, and with it the length of the sequence offsets given to the recurrent layers,
+changes at every step, and each new length recompiled those layers (37 recompilations in 25 steps on
+the small preset; on the B200, removing them doubled the throughput); the length is now declared
+dynamic. The depth state gives each of the 36 blocks its
+own specialisation, so the compiler keeps one variant per layer instead of its default eight, past
+which a block and the attention it calls fall back to uncompiled code. With the three changes the step
+time is constant from the second step, and the losses are unchanged. The loss, finally, is computed in
+chunks of 8,192 tokens, each recomputed in the backward pass, so that the full logits are never held:
+at a micro-batch of four sequences this takes 12 GiB less. The chunks compute the cross-entropy in
+float32; under autocast, that of the bfloat16 logits differed from it by 5e-4 nats on a test batch.
+
 ## 5. Experimental Setup
 
 ### 5.1 Proxy model
@@ -347,7 +367,8 @@ AdamW variants, so any tuning advantage belongs to the baseline.
 - **Stability**: the maximum and upper percentiles of the gradient norm before clipping, the
   fraction of steps above the clipping threshold, and loss spikes (§6.5).
 - **Throughput and memory** of the 990M model in training and in generation, measured separately on a
-  single RTX 4090 (§6.8, §6.9).
+  single RTX 4090 (§6.8, §6.9), and the training step of the launch configuration on a single B200
+  (§6.8).
 
 ### 5.5 Statistical protocol
 
@@ -544,10 +565,12 @@ rate.
 
 The dense proxy is also 1.64× faster on the RTX 4090. The ratio depends on width and sequence
 length: at 990M parameters and 8,192 tokens the dense configuration's training step is 1.24× faster
-than the hybrid's (§6.8), so at equal training time the dense model sees about a third more tokens. We
-trained the dense proxy on 40M tokens, 1.33 times the budget, with the same schedule shape (seed 1234):
+than the hybrid's on the RTX 4090 and 1.16× faster on a B200 (§6.8), so at equal training time the dense
+model sees a sixth to a quarter more tokens. We
+trained the dense proxy on 40M tokens, 1.33 times the budget, which errs in its favour, with the same
+schedule shape (seed 1234):
 its validation cross-entropy is 4.280 against 4.297 for the hybrid on 30M tokens, and its bits per byte
-0.901 against 0.919 (0.663 against 0.671 on real COBOL). At equal time on this GPU the dense model is
+0.901 against 0.919 (0.663 against 0.671 on real COBOL). At equal time the dense model is
 slightly ahead, by about as much as the hybrid is ahead at equal tokens: per unit of training compute,
 at this scale and context length, neither architecture wins.
 
@@ -617,6 +640,44 @@ corpus averages 1,266 tokens per document (502B tokens in 396.7M documents), and
 its training-speed advantage at any window length. The recurrent layers pay off where one long document
 is read whole — a program with its copybooks — in inference, and in a long-context phase of training.
 
+**On a B200.** We measured the training step of the launch configuration (§7) on the GPU the 990M model
+is meant for: the framework's pre-training trainer on one NVIDIA B200 (180 GB), sequence length 8,192,
+document masking on batches of the pre-training corpus, Muon, `torch.compile` and bfloat16.
+
+Table: Training throughput of the 990M model on one NVIDIA B200 with the launch configuration: tokens per second over the second half of twelve optimiser steps of two micro-batches each; peak memory as reported by the driver.
+
+| configuration | micro-batch | checkpointing | tokens / s | peak memory (GiB) |
+|---|---:|:---:|---:|---:|
+| hybrid (Skylar 2) | 2 | no | 45,297 | 79.8 |
+| hybrid (Skylar 2) | 3 | no | 47,963 | 109.0 |
+| hybrid (Skylar 2) | 4 | no | 50,428 | 139.4 |
+| hybrid (Skylar 2) | 4 | yes | 23,464 | 63.1 |
+| hybrid (Skylar 2) | 8 | yes | 24,852 | 107.8 |
+| dense, same components | 4 | no | 58,546 | 123.1 |
+
+At the largest micro-batch that leaves a fifth of the memory free, four sequences, the dense
+configuration's step is 1.16 times faster than the hybrid's, against 1.24 on the RTX 4090: the ratio
+carries over to the data-centre GPU. Four sequences fit under that limit only with the loss computed in
+chunks (§4.6): with the full logits they took 152 GiB, and a run with evaluations and checkpoints ran
+out of memory. Activation checkpointing halves the throughput, more than the recomputed forward pass
+accounts for, so the model trains without it. In a run of 100 optimiser steps of 1M tokens (32
+micro-batches of four sequences) the hybrid trained at 53,000 tokens per second between
+evaluations, where the optimiser step is amortised over the micro-batches, and the validation
+cross-entropy fell from 11.11 to 5.38; the run was stopped at step 80 and resumed from its checkpoint
+without a jump in the loss, and the generation cache of its final checkpoint matches a full
+recomputation. At this rate 300B tokens take 66 days of one B200, about 10,700 US dollars at
+the rate we paid; the scaling to several GPUs is not measured.
+
+In model FLOPs, 6.56 GFLOP per token for the hybrid and 7.36 for the dense configuration (six per
+parameter of every linear map, the output head included, plus attention over the mean context of 1,976
+tokens measured on batches of the corpus), the run uses 15% of the B200's dense bfloat16 peak; in the
+sweep, at four sequences, the dense configuration reaches 19%. The steps of Table 9 reach 26% and 35% of
+the RTX 4090's. A profile of one step (forward and backward, four sequences)
+divides the GPU time into the recurrent kernels, 28%, matrix multiplications, 26%, which run at 58% of
+the peak, elementwise operations and copies, 26%, block aggregation, 12%, and attention, 7%: the time
+goes to memory-bound kernels, which a model of this width cannot hide behind its matrix
+multiplications. Its training throughput has not been tuned beyond the changes of §4.6.
+
 ### 6.9 Generation
 
 The two architectures differ most in what they keep per sequence during generation. An attention layer
@@ -676,14 +737,27 @@ The launch flags of the framework are
 --attn_out_gate perhead --hidden_act situ_glu --optimizer muon --doc_masking
 ```
 
+On a B200 the model trains with four sequences of 8,192 tokens per micro-batch, the loss computed in
+chunks and without activation checkpointing (§4.6, §6.8).
+
 For the 990M model on 300B tokens, the peak learning rate of AdamW derived from
 a learning-rate scaling law [24], anchored at our 980M run, is 1.16e-4. Muon uses the AdamW scale
 (§6.6), and we set it to twice that value, 2.3e-4, the centre of the flat region measured in §6.6 and
 consistent with the upward shift of the optimal rate under Muon reported in [3]. This value is an
 extrapolation from a proxy to a model three times wider, with seven times the parameters, trained on
-ten thousand times more tokens. The training plan fixes a stopping rule in advance: at 10B and 30B
-tokens the bits per byte must be below the trajectory of the 980M model, which bounds the cost of a
-wrong choice. The schedule holds the learning rate constant and merges the final checkpoints [25].
+ten thousand times more tokens. The training plan fixes a stopping rule in advance, which bounds the
+cost of a wrong choice: at 20B tokens, the length of the 980M model's run and 7% of the budget, the bits
+per byte on general code published after both pre-training corpora were closed must be below those of
+the 980M model at the end of its run, 0.512. The set holds 596 KB of Python, Java, JavaScript, Go and C
+from 32 files of 17 GitHub repositories created after 1 August 2026 (not filtered against our corpora,
+so copies of older code may remain); with it we measure, outside the
+rule, 550 KB of COBOL from 72 files of 41 such repositories, keeping only files that share at most 20% of
+their 10-grams with the COBOL sources of our corpora, and 433 KB of Italian encyclopedic articles created
+in September 2026 (0.319 and 0.912 bits per byte for the 980M model). Code is the domain the two corpora
+share in comparable proportion; COBOL weighs several times more in the 980M model's mixture (2.3% of
+its tokens, against 0.34% of our bytes) until the burst at the end of our run. The frozen slices of §5.4 cannot serve here: they come from the
+sources of both corpora, and the 980M model reproduces the real-COBOL slice almost verbatim (0.087 bits
+per byte). The schedule holds the learning rate constant and merges the final checkpoints [25].
 
 ## 8. Limitations
 
@@ -699,18 +773,17 @@ wrong choice. The schedule holds the learning rate constant and merges the final
    the same sources as the pre-training data and are not guaranteed to be disjoint from it. No
    downstream task is evaluated: the pass@1 of a 146M model trained on 30M tokens on COBOLEval is not
    informative.
-4. **Hardware.** Throughput and memory are measured on an RTX 4090. The data-centre GPUs on which the
-   990M model will be trained have different memory bandwidth and cache sizes; the relative costs in
-   §6.8 are expected to hold in sign, not in magnitude, until measured there.
+4. **Hardware.** The per-component costs and generation are measured on an RTX 4090. On a B200 we
+   measured the training step of the launch configuration and of its dense counterpart only (§6.8);
+   the relative costs of the individual components there are not measured, and neither is the scaling
+   to several GPUs. The throughput is not tuned: 15% of the B200's peak.
 5. **Stability.** The stress test uses one seed per arm, and the spike definition of [3] does not
    discriminate at our batch size (§6.5).
 6. **Memory.** Block AttnRes keeps the block sums and the partial sum alive until the backward pass,
    which costs 5.9 GiB per 8,192 tokens on the 990M model and constrains the micro-batch size.
-7. **Hybrid against dense.** The equal-time comparison rests on the step ratio of an RTX 4090 at 8,192
-   tokens and on one seed. On data-centre GPUs, whose attention kernels are more mature than the
-   recurrent ones, the dense model's training advantage may be larger; the ratio is measured on the
-   target GPU before the run. Generation is measured with the framework's reference path, not with a
-   serving engine.
+7. **Hybrid against dense.** The equal-time comparison rests on the step ratio at 8,192 tokens, 1.24 on
+   an RTX 4090 and 1.16 on a B200, and on one seed. Generation is measured with the framework's
+   reference path, not with a serving engine.
 
 ## 9. Conclusion
 
@@ -727,9 +800,9 @@ whole, with their copybooks, on local hardware, that is the cost that matters.
 
 Two findings are methodological. An aggregation scheme that wins at 12 layers fails at 36, so
 architectural ablations belong at the target depth. And effects measured at 0.2 tokens per parameter,
-Muon's above all, are upper bounds for a run of 300B tokens. What the proxy cannot show, training
-throughput on data-centre GPUs and whether the effects survive 300B tokens, is measured first on the
-target hardware and then by the stopping rule of §7.
+Muon's above all, are upper bounds for a run of 300B tokens. Training throughput on the target GPU is
+now measured: 53,000 tokens per second on one B200, 66 days of one GPU for 300B tokens. Whether the
+effects survive 300B tokens is measured by the stopping rule of §7.
 
 ## Reproducibility
 
@@ -740,9 +813,14 @@ normalisation), `models/layers/kda.py` (the recurrent layer and its document iso
 `training/bin.pretrain.py` (`--attn_res_mode`, `--attn_res_block_size`, `--gated_norm`,
 `--optimizer muon`), `eval/bin.gate_arch_v2.py` (18 checks) and `eval/bin.arch_ablation.py`, which runs
 the protocol of §5 on any corpus in the framework's shard format and reports paired differences. The
-pre-training corpus and the frozen bits-per-byte slices are private. Software: PyTorch 2.10.0 (CUDA
+pre-training corpus and the frozen bits-per-byte slices are private; the texts of the post-cutoff set of
+§7 are private as well, and its manifest (repositories, commits, paths, page identifiers, hashes) is in
+`eval/postcutoff_bytes/manifest.json`. Software: PyTorch 2.10.0 (CUDA
 12.8), Triton 3.6.0, flash-linear-attention 0.5.2 (pinned: kernel conventions change between releases
-without raising errors), Transformers 4.52.4. Hardware: one RTX 4090 (24 GB). The 38 proxy runs took 16.7 GPU-hours; the measurements at 990M about two more.
+without raising errors), Transformers 4.52.4. Hardware: one RTX 4090 (24 GB) for the proxy runs and for the 990M measurements
+on it; one NVIDIA B200 (180 GB) for the training throughput of §6.8. The 38 proxy runs took 16.7
+GPU-hours, the measurements at 990M on the RTX 4090 about two more, and those on the B200 about four,
+including the runs that exposed the problems of §4.6.
 
 ## References
 

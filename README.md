@@ -148,18 +148,21 @@ mixture, three paired seeds: block AttnRes **−0.078** nats of validation cross
 AttnRes, gated normalisation a further **−0.232**, Muon a further **−0.292** (all 3/3 seeds); bits per
 byte **−23%** overall and **−31%** on real COBOL. Depth aggregation has to be ablated at the target
 depth: a sliding-window variant that wins at 12 layers does not train at 36. Against a dense
-Transformer with the same components the hybrid does not save training compute (on an RTX 4090 at
-seq 8192 the dense step is 1.24× faster); it pays off at inference over long inputs: at 32,768 tokens
-its cache per sequence is 3.9× smaller (0.58 vs 2.26 GiB on the 990M), and with several long prompts
-it generates 1.9× more tokens per second. **No Skylar 2 model has been trained at scale yet.**
+Transformer with the same components the hybrid does not save training compute (at seq 8192 the dense
+step is 1.24× faster on an RTX 4090 and 1.16× on a B200); it pays off at inference over long inputs: at
+32,768 tokens its cache per sequence is 3.9× smaller (0.58 vs 2.26 GiB on the 990M), and with several
+long prompts it generates 1.9× more tokens per second. On one B200 the 990M trains at **53k tokens/s**
+(4 × 8192 tokens per micro-batch, no activation checkpointing, `--compile`): 300B tokens take 66
+GPU-days, about 8 days on an 8-GPU node if throughput scales (not yet measured). **No Skylar 2 model has been trained at scale yet.**
 
 ```bash
 pip install -r requirements.txt            # includes flash-linear-attention (pinned, MIT)
 python eval/bin.gate_arch_v2.py            # 18 correctness gates (v1 parity, init, cache, doc isolation, fused kernel, checkpointing, KDA without CUDA)
+# one B200 (180 GB); on smaller GPUs lower --batch_size and add --grad_ckpt
 python training/bin.pretrain.py --preset 1B_D --data <tokenized_dir> --tokenizer <tokenizer.json> \
-    --seq_len 8192 --kda_ratio 3:1 --attn_res --attn_res_mode block --attn_res_block_size 8 \
-    --gated_norm 16 --attn_out_gate perhead --hidden_act situ_glu --optimizer muon --lr 2.3e-4 \
-    --doc_masking --dropout 0 --lr_schedule constant --compile --grad_ckpt
+    --seq_len 8192 --batch_size 4 --grad_accum 32 --kda_ratio 3:1 --attn_res --attn_res_mode block \
+    --attn_res_block_size 8 --gated_norm 16 --attn_out_gate perhead --hidden_act situ_glu \
+    --optimizer muon --lr 2.3e-4 --doc_masking --dropout 0 --lr_schedule constant --compile
 python eval/bin.cache_parity.py --ckpt <out>/last   # cache vs full recompute on a trained checkpoint
 python eval/bin.arch_ablation.py --data <tokenized_dir> --out runs/ablation   # the ablation protocol of the report
 ```

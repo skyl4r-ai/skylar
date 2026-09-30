@@ -42,9 +42,14 @@ except ImportError:
 # enough: KDA's Triton kernels and gradient checkpointing break the graph, and outside a compiled region
 # flex_attention silently falls back to a reference implementation that materialises the full T×T score
 # matrix (at seq 8192 on the 990M: OOM on 24 GB, and far slower everywhere). Compiled lazily, CUDA only.
+# Inside a compiled model the call must stay outside the model's graph as well: traced from the model
+# (no activation checkpointing, `--compile`) it ran the reference implementation, found by the first
+# B200 smoke on 30/09/2026 (bs 4 at seq 8192: 171 GiB and 13k tok/s). `recursive=False` keeps dynamo
+# off this frame only, so the separately compiled kernel below still compiles.
 _flex_compiled = None
 
 
+@torch.compiler.disable(recursive=False)
 def _flex(q, k, v, **kw):
     global _flex_compiled
     if not q.is_cuda:
@@ -91,6 +96,7 @@ def create_document_block_mask(document_ids, n_heads, device=None):
     return create_block_mask(mask_mod, B=B, H=None, Q_LEN=T, KV_LEN=T, device=device)
 
 
+@torch.compiler.disable
 def build_cu_seqlens(document_ids):
     """
     Confini dei documenti in forma cumulativa, per i layer ricorrenti.
@@ -125,7 +131,12 @@ def build_cu_seqlens(document_ids):
             bounds.append(offset + i)
         offset += T
         bounds.append(offset)
-    return torch.tensor(bounds, dtype=torch.int32, device=document_ids.device)
+    cu = torch.tensor(bounds, dtype=torch.int32, device=document_ids.device)
+    # Il numero di documenti cambia a ogni batch. Sotto torch.compile ogni lunghezza nuova ricompilava
+    # i layer che ricevono `cu_seqlens` (30/09/2026: una ricompilazione a ogni batch, e in un run lungo
+    # si passa il limite e i layer tornano non compilati): la dimensione e' dichiarata variabile.
+    torch._dynamo.maybe_mark_dynamic(cu, 0)
+    return cu
 
 
 def make_packing_mask(document_ids, dtype=torch.bfloat16):

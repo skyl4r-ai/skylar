@@ -439,6 +439,15 @@ def main():
     # profiled 3x slower). dynamic=False: the loader feeds a fresh tensor each step; without it
     # dynamo's dynamic-shape inference recompiles on step 2.
     if args.compile:
+        # Without activation checkpointing every block is a compiled frame of its own, and with
+        # AttnRes dynamo specialises it on the depth state (the source count changes at every
+        # layer): one variant per layer. Past recompile_limit (8) dynamo stops compiling the frame
+        # and everything it calls, flex_attention included, which then materialises the full T x T
+        # scores (990M at seq 8192: out of memory on a 180 GB B200). Room for a variant per layer.
+        n_layers = model.config.n_layers
+        dc = torch._dynamo.config
+        dc.recompile_limit = max(dc.recompile_limit, 2 * n_layers)
+        dc.accumulated_recompile_limit = max(dc.accumulated_recompile_limit, 16 * n_layers)
         model = torch.compile(model, dynamic=False)
     if isinstance(opt, OptimizerSet):
         model, *prepared = accelerator.prepare(model, *opt.opts)
@@ -524,7 +533,7 @@ def main():
             doc = batch[2] if len(batch) == 3 else None
             x, y = batch[0], batch[1]
             with torch.autocast(device.type, dtype=amp_dtype, enabled=(device.type == "cuda")):
-                out = raw_model(input_ids=x, labels=y, document_ids=doc)
+                out = raw_model(input_ids=x, labels=y, document_ids=doc, loss_only=True)
             tot += out["loss"].item()
             parts = out.get("loss_parts") or {}
             tot_ce += float(parts["ce"]) if "ce" in parts else out["loss"].item()
@@ -567,7 +576,7 @@ def main():
                 x, y = batch[0], batch[1]
                 with accelerator.accumulate(model):
                     with torch.autocast(device.type, dtype=amp_dtype, enabled=(device.type == "cuda")):
-                        loss = model(input_ids=x, labels=y, document_ids=doc)["loss"]
+                        loss = model(input_ids=x, labels=y, document_ids=doc, loss_only=True)["loss"]
                     accelerator.backward(loss)
                     if accelerator.sync_gradients:
                         grad_norm = float(accelerator.clip_grad_norm_(model.parameters(), 1.0))

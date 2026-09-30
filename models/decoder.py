@@ -47,6 +47,29 @@ from models.mtp import MTPModule
 logger = logging.getLogger(__name__)
 
 
+def _ce_sum(x, weight, labels, alpha):
+    logits = F.linear(x, weight)
+    if alpha != 1.0:
+        logits = logits * alpha
+    return F.cross_entropy(logits.to(torch.promote_types(logits.dtype, torch.float32)), labels,
+                           ignore_index=-100, reduction="sum")
+
+
+def chunked_cross_entropy(x, weight, labels, alpha=1.0, chunk=8192):
+    """Mean cross-entropy of the output head over the labelled tokens, without holding the (N, V)
+    logits: chunks of `chunk` tokens, each recomputed in the backward pass. At 4 x 8,192 tokens and a
+    64,000-token vocabulary the logits, their float32 copy and its gradient take ~20 GB; the
+    recomputation costs one more head matmul, about 3% of a step of the 990M model."""
+    x = x.reshape(-1, x.size(-1))
+    labels = labels.reshape(-1)
+    total = None
+    for i in range(0, x.size(0), chunk):
+        part = torch.utils.checkpoint.checkpoint(_ce_sum, x[i:i + chunk], weight, labels[i:i + chunk],
+                                                 alpha, use_reentrant=False)
+        total = part if total is None else total + part
+    return total / (labels != -100).sum().clamp(min=1)
+
+
 class Skylar2ForCausalLM(PreTrainedModel):
     """
     Skylar 2 decoder-only Transformer (docs/PAPER_V2.md; with the options off, the v1 decoder of docs/PAPER.md).
@@ -264,7 +287,7 @@ class Skylar2ForCausalLM(PreTrainedModel):
         validate_kv_cache(kv_cache, self.blocks, batch_size, x_device)
 
     def forward(self, input_ids, labels=None, kv_cache=None, document_ids=None,
-                attention_mask=None, use_cache=False, return_hidden=False):
+                attention_mask=None, use_cache=False, return_hidden=False, loss_only=False):
         """
         Args:
             input_ids:      (B, T) token indices
@@ -276,6 +299,8 @@ class Skylar2ForCausalLM(PreTrainedModel):
             use_cache: Bool if use cache.
             return_hidden:  also return 'hidden', the (B, T, d_model) state the head reads (after the
                             final norm): what an embedder pools.
+            loss_only:      with labels, compute the loss in chunks without the full logits, which are
+                            then not returned ('logits' is None): the pre-training path.
 
         Returns:
             dict with 'logits', 'loss' (if labels), 'kv_cache' (and 'hidden' if return_hidden)
@@ -377,20 +402,24 @@ class Skylar2ForCausalLM(PreTrainedModel):
                 x = self.res_final.mix(depth.sources())
             x_pre = x             # serve alle teste MTP, che normalizzano per conto loro
             x = self.ln_f(x)
-        logits = self.lm_head(x)
-
-        # µP: scale output logits to keep magnitude stable across widths
-        if self._mup_output_alpha != 1.0:
-            logits = logits * self._mup_output_alpha
-
         loss = None
         loss_parts = {}
+        if loss_only and labels is not None:
+            logits = None
+            loss = chunked_cross_entropy(x, self.lm_head.weight, labels, self._mup_output_alpha)
+        else:
+            logits = self.lm_head(x)
+            # µP: scale output logits to keep magnitude stable across widths
+            if self._mup_output_alpha != 1.0:
+                logits = logits * self._mup_output_alpha
+
         if labels is not None:
-            loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)),
-                labels.view(-1),
-                ignore_index=-100,
-            )
+            if loss is None:
+                loss = F.cross_entropy(
+                    logits.view(-1, logits.size(-1)),
+                    labels.view(-1),
+                    ignore_index=-100,
+                )
             if self.mtp is not None and len(self.mtp):
                 # `x_pre` e' lo stato PRIMA di ln_f: la testa MTP applica la sua
                 # normalizzazione, come nel trunk.
