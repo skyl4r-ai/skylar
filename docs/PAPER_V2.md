@@ -567,7 +567,7 @@ The dense proxy is also 1.64× faster on the RTX 4090. The ratio depends on widt
 length: at 990M parameters and 8,192 tokens the dense configuration's training step is 1.24× faster
 than the hybrid's on the RTX 4090 and 1.16× faster on a B200 (§6.8), so at equal training time the dense
 model sees a sixth to a quarter more tokens. We
-trained the dense proxy on 40M tokens, 1.33 times the budget, which errs in its favour, with the same
+trained the dense proxy on 40M tokens, 1.33 times the token budget, which errs in its favour, with the same
 schedule shape (seed 1234):
 its validation cross-entropy is 4.280 against 4.297 for the hybrid on 30M tokens, and its bits per byte
 0.901 against 0.919 (0.663 against 0.671 on real COBOL). At equal time the dense model is
@@ -665,8 +665,8 @@ micro-batches of four sequences) the hybrid trained at 53,000 tokens per second 
 evaluations, where the optimiser step is amortised over the micro-batches, and the validation
 cross-entropy fell from 11.11 to 5.38; the run was stopped at step 80 and resumed from its checkpoint
 without a jump in the loss, and the generation cache of its final checkpoint matches a full
-recomputation. At this rate 300B tokens take 66 days of one B200, about 10,700 US dollars at
-the rate we paid; the scaling to several GPUs is not measured.
+recomputation. At this rate 300B tokens take about 1,570 B200-hours, 66 days on one GPU; the scaling
+to several GPUs is not measured.
 
 In model FLOPs, 6.56 GFLOP per token for the hybrid and 7.36 for the dense configuration (six per
 parameter of every linear map, the output head included, plus attention over the mean context of 1,976
@@ -746,7 +746,7 @@ a learning-rate scaling law [24], anchored at our 980M run, is 1.16e-4. Muon use
 consistent with the upward shift of the optimal rate under Muon reported in [3]. This value is an
 extrapolation from a proxy to a model three times wider, with seven times the parameters, trained on
 ten thousand times more tokens. The training plan fixes a stopping rule in advance, which bounds the
-cost of a wrong choice: at 20B tokens, the length of the 980M model's run and 7% of the budget, the bits
+cost of a wrong choice: at 20B tokens, the length of the 980M model's run and 7% of the planned tokens, the bits
 per byte on general code published after both pre-training corpora were closed must be below those of
 the 980M model at the end of its run, 0.512. The set holds 596 KB of Python, Java, JavaScript, Go and C
 from 32 files of 17 GitHub repositories created after 1 August 2026 (not filtered against our corpora,
