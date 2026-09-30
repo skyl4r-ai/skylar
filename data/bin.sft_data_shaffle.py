@@ -1,3 +1,6 @@
+# =================================================================
+# @copyright: A. Ivanovitch | CEO SKYL4R | 2026
+# =================================================================
 """
 Converte DATA-AI_Conversation_ITA_full.json → sft_train.jsonl
 con system prompt variati per evitare memorizzazione.

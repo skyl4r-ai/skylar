@@ -1,3 +1,6 @@
+# =================================================================
+# @copyright: A. Ivanovitch | CEO SKYL4R | 2026
+# =================================================================
 """
 Train SkylarClassifier — BERT-style sequence classification (non-generative).
 

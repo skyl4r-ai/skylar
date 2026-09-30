@@ -1,3 +1,6 @@
+# =================================================================
+# @copyright: A. Ivanovitch | CEO SKYL4R | 2026
+# =================================================================
 """
 Build a REAL Italian retrieval training set from SQuAD-it (crux82/squad_it).
 

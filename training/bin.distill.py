@@ -1,3 +1,6 @@
+# =================================================================
+# @copyright: A. Ivanovitch | CEO SKYL4R | 2026
+# =================================================================
 """
 Knowledge Distillation (KD) — compress a large teacher into a small student.
 

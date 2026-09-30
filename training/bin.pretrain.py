@@ -1,3 +1,6 @@
+# =================================================================
+# @copyright: A. Ivanovitch | CEO SKYL4R | 2026
+# =================================================================
 """
 From-scratch decoder-only pretrain — the framework's real long-run trainer.
 

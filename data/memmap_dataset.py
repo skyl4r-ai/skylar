@@ -1,3 +1,6 @@
+# =================================================================
+# @copyright: A. Ivanovitch | CEO SKYL4R | 2026
+# =================================================================
 """
 Reusable memmap token dataset + background prefetcher — the streaming data layer.
 

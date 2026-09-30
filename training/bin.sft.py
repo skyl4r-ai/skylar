@@ -1,3 +1,6 @@
+# =================================================================
+# @copyright: A. Ivanovitch | CEO SKYL4R | 2026
+# =================================================================
 """
 Supervised Fine-Tuning (SFT) — turn a base model into a chat model.
 

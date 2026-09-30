@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# =================================================================
+# @copyright: A. Ivanovitch | CEO SKYL4R | 2026
+# =================================================================
 # filepath: test_ted_processor.py
 """Tests for TED processor — based on real TED data format."""
 

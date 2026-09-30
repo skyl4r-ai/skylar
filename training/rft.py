@@ -1,3 +1,6 @@
+# =================================================================
+# @copyright: A. Ivanovitch | CEO SKYL4R | 2026
+# =================================================================
 """
 Generic rejection-sampling fine-tuning (RFT / STaR) — the cheap, high-value step BETWEEN SFT and
 GRPO. Sample N candidate completions per record, KEEP ONLY the ones a PLUGGABLE reward verifies

@@ -1,3 +1,6 @@
+# =================================================================
+# @copyright: A. Ivanovitch | CEO SKYL4R | 2026
+# =================================================================
 """
 Synthetic Italian intent-classification dataset (banking) for SkylarClassifier.
 

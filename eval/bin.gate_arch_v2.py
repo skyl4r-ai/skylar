@@ -1,6 +1,6 @@
 """
 =================================================================
-@copyright: A. Ivanovitch | CEO MwSpace | 2026
+@copyright: A. Ivanovitch | CEO SKYL4R | 2026
 =================================================================
 
 Gate automatici per l'architettura Skylar 2 (docs/PAPER_V2.md §4.5).

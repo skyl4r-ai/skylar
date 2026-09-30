@@ -1,6 +1,6 @@
 """
 =================================================================
-@copyright: A. Ivanovitch | CEO MwSpace | 2026
+@copyright: A. Ivanovitch | CEO SKYL4R | 2026
 =================================================================
 
 Bits-per-byte su un set di byte congelato — l'unico ponte fra modelli con

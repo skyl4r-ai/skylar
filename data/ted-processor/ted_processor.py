@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# =================================================================
+# @copyright: A. Ivanovitch | CEO SKYL4R | 2026
+# =================================================================
 # filepath: ted_processor.py
 """TED Europa data processor for Italian pretrain corpus.
 

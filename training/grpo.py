@@ -1,3 +1,6 @@
+# =================================================================
+# @copyright: A. Ivanovitch | CEO SKYL4R | 2026
+# =================================================================
 """
 Generic GRPO (Group Relative Policy Optimization) — RLVR with a PLUGGABLE verifiable reward,
 no reward model, no value model. This is the framework's RL step; a project supplies only a

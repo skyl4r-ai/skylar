@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# =================================================================
+# @copyright: A. Ivanovitch | CEO SKYL4R | 2026
+# =================================================================
 
 """
 Shard + clean di un grande TXT (es. Eur-Lex / DGT-Acquis / dump giurisprudenza).

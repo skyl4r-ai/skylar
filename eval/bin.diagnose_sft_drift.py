@@ -1,3 +1,6 @@
+# =================================================================
+# @copyright: A. Ivanovitch | CEO SKYL4R | 2026
+# =================================================================
 """
 SFT Diagnostic Tool — finds exactly why the chat model gives nonsense.
 

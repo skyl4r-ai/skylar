@@ -1,6 +1,6 @@
 """
 =================================================================
-@copyright: A. Ivanovitch | CEO MwSpace | 2026
+@copyright: A. Ivanovitch | CEO SKYL4R | 2026
 =================================================================
 
 MTP — Multi-Token Prediction (stile DeepSeek-V3, arXiv 2412.19437).

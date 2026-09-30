@@ -1,3 +1,6 @@
+# =================================================================
+# @copyright: A. Ivanovitch | CEO SKYL4R | 2026
+# =================================================================
 """
 Reference-free preference optimization for the chat policy: ORPO (default) or SimPO.
 

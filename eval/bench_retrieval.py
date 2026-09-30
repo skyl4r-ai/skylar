@@ -1,3 +1,6 @@
+# =================================================================
+# @copyright: A. Ivanovitch | CEO SKYL4R | 2026
+# =================================================================
 """
 Real Italian retrieval benchmark — apples-to-apples, same pool, same metrics.
 

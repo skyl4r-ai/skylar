@@ -1,3 +1,6 @@
+# =================================================================
+# @copyright: A. Ivanovitch | CEO SKYL4R | 2026
+# =================================================================
 """
 Train SkylarSparseEncoder (SPLADE-style learned sparse retrieval).
 

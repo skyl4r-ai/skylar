@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# =================================================================
+# @copyright: A. Ivanovitch | CEO SKYL4R | 2026
+# =================================================================
 # filepath: ted_pipeline.py
 """TED Europa full pipeline: download → extract → parse → pretrain.txt
 

@@ -1,3 +1,6 @@
+# =================================================================
+# @copyright: A. Ivanovitch | CEO SKYL4R | 2026
+# =================================================================
 """
 Real public Italian benchmarks for the Skylar2ForCausalLM base model.
 

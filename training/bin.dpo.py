@@ -1,3 +1,6 @@
+# =================================================================
+# @copyright: A. Ivanovitch | CEO SKYL4R | 2026
+# =================================================================
 """
 DPO entry point — INTENTIONALLY NOT IMPLEMENTED (use ORPO/SimPO instead).
 

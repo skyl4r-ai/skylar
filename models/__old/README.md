@@ -15,7 +15,8 @@ Ogni file qui dentro è la **versione con cui sono stati addestrati i modelli pu
 | `Skyl4r-Ai/Skylar-980M-Cobol` (SFT) | questa |
 
 Quindi: se un checkpoint v1 non si carica più con i `models/` nuovi, **la verità è qui**.
-I file sono riusabili tali e quali — nessuno è stato modificato, solo copiato.
+I file sono riusabili tali e quali — nessuno è stato modificato, solo copiato. Unica eccezione, il
+30/09/2026: la riga di copyright in testa ai file (`CEO MwSpace` → `CEO SKYL4R`): il codice è lo stesso.
 
 ## Come si riusa
 

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# =================================================================
+# @copyright: A. Ivanovitch | CEO SKYL4R | 2026
+# =================================================================
 """
 Pre-tokenize large text corpora into sharded binary token files (.bin) + metadata.
 

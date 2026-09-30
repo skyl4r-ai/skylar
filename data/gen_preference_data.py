@@ -1,3 +1,6 @@
+# =================================================================
+# @copyright: A. Ivanovitch | CEO SKYL4R | 2026
+# =================================================================
 """
 Italian preference pairs (prompt, chosen, rejected) for ORPO/SimPO.
 

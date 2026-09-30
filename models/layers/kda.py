@@ -1,6 +1,6 @@
 """
 =================================================================
-@copyright: A. Ivanovitch | CEO MwSpace | 2026
+@copyright: A. Ivanovitch | CEO SKYL4R | 2026
 =================================================================
 
 KDA — Kimi Delta Attention: il layer ricorrente dell'ibrido (docs/PAPER_V2.md §3.2, §4.4).

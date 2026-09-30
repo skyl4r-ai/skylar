@@ -1,3 +1,6 @@
+# =================================================================
+# @copyright: A. Ivanovitch | CEO SKYL4R | 2026
+# =================================================================
 import torch
 from tokenizers import Tokenizer, decoders
 from models.decoder import Skylar2ForCausalLM

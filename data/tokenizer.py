@@ -1,3 +1,6 @@
+# =================================================================
+# @copyright: A. Ivanovitch | CEO SKYL4R | 2026
+# =================================================================
 """
 Reusable tokenizer library — train a (code-aware) ByteLevel BPE and tokenize a corpus
 into little-endian uint16/uint32 memmap shards. This is the importable, code-model-ready

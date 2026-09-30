@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# =================================================================
+# @copyright: A. Ivanovitch | CEO SKYL4R | 2026
+# =================================================================
 """Diagnose where Italian accented characters are lost in the pipeline.
 
 Usage:

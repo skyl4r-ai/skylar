@@ -1,3 +1,6 @@
+# =================================================================
+# @copyright: A. Ivanovitch | CEO SKYL4R | 2026
+# =================================================================
 """
 WSM checkpoint merge — the "decay" of a constant-LR run, done post-hoc (paper 2507.17634).
 

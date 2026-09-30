@@ -1,3 +1,6 @@
+# =================================================================
+# @copyright: A. Ivanovitch | CEO SKYL4R | 2026
+# =================================================================
 """
 Cache parity on a TRAINED checkpoint: greedy decode with the KV/recurrent cache vs full recompute.
 

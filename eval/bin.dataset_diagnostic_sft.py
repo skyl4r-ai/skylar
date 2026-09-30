@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# =================================================================
+# @copyright: A. Ivanovitch | CEO SKYL4R | 2026
+# =================================================================
 
 """
 Conversation dataset analyzer — extracts statistics and semantic biases from JSONL datasets.

@@ -1,6 +1,6 @@
 """
 =================================================================
-@copyright: A. Ivanovitch | CEO MwSpace | 2026
+@copyright: A. Ivanovitch | CEO SKYL4R | 2026
 =================================================================
 
 AttnRes — attenzione softmax sulla PROFONDITÀ (Kimi, arXiv 2603.15031).
