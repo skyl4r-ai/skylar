@@ -1,5 +1,5 @@
 """
-Real public Italian benchmarks for the NanoTransformer base model.
+Real public Italian benchmarks for the Skylar2ForCausalLM base model.
 
 Likelihood-based multiple-choice scoring (the standard lm-eval method): for each
 candidate continuation we sum the model's log-prob over the continuation tokens
@@ -26,7 +26,7 @@ import torch.nn.functional as F
 from tokenizers import Tokenizer
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from models.decoder import NanoTransformer
+from models.decoder import Skylar2ForCausalLM
 
 
 # ── task builders: return list of (context:str, candidates:[str], gold:int) ──
@@ -131,7 +131,7 @@ def main():
     args = ap.parse_args()
 
     print(f"Loading {args.model} on {args.device} ...")
-    model = NanoTransformer.from_pretrained(args.model).to(args.device).eval()
+    model = Skylar2ForCausalLM.from_pretrained(args.model).to(args.device).eval()
     tok = Tokenizer.from_file(f"{args.model}/tokenizer.json")
     bos_id = tok.token_to_id("<bos>")
 

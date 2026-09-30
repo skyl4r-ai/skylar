@@ -15,7 +15,7 @@ import os
 import torch
 from tokenizers import Tokenizer, decoders
 
-from models.decoder import NanoTransformer
+from models.decoder import Skylar2ForCausalLM
 from utils.chatML import encode_chatml
 
 from rich.console import Console
@@ -115,7 +115,7 @@ def print_header(model_name, n_params, device, system_prompt, settings):
     console.print()
     console.print(Panel(
         info_table,
-        title="[bold bright_cyan]◆ Skylar Chat[/bold bright_cyan] [dim]— Skylar NanoTransformer[/dim]",
+        title="[bold bright_cyan]◆ Skylar Chat[/bold bright_cyan] [dim]— Skylar Skylar2ForCausalLM[/dim]",
         border_style="cyan",
         width=min(console.width, 80),
         padding=(1, 2),
@@ -208,7 +208,7 @@ def main():
         device = args.device
 
     # ── Load model ──
-    model = NanoTransformer.from_pretrained(args.model).to(device)
+    model = Skylar2ForCausalLM.from_pretrained(args.model).to(device)
     model.eval()
     tokenizer = Tokenizer.from_file(f"{args.model}/tokenizer.json")
     if tokenizer.decoder is None:

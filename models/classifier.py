@@ -90,8 +90,8 @@ class SkylarClassifier(PreTrainedModel):
 
     @classmethod
     def from_decoder(cls, decoder_path: str, num_labels: int, pool_strategy: str = "mean"):
-        from models.decoder import NanoTransformer
-        decoder = NanoTransformer.from_pretrained(decoder_path)
+        from models.decoder import Skylar2ForCausalLM
+        decoder = Skylar2ForCausalLM.from_pretrained(decoder_path)
         config = decoder.config
         config.num_labels = num_labels
         config.pool_strategy = pool_strategy

@@ -130,32 +130,43 @@ python inference/bin.chat.py --model checkpoints_sft/best
 Skylar 2 is a revision of the architecture aimed at long-context, domain-specialised code models
 (COBOL first: programs + copybooks + JCL make long context a functional requirement). It lives in
 the same codebase **behind flags** — with every flag off the model is **bit-identical to v1**, so all
-published checkpoints load and generate exactly as before.
+published checkpoints load and generate exactly as before. Every component was selected by a
+three-seed paired ablation on a proxy with the depth and layer layout of the 990M model; the
+technical report is [`docs/PAPER_V2.md`](docs/PAPER_V2.md) ([PDF](docs/paper/skylar2_paper.pdf)).
 
 | Component | Flag | What it does |
 |:--|:--|:--|
 | Kimi Delta Attention hybrid | `--kda_ratio 3:1` | 3 recurrent layers per full-attention layer, sized at **parameter parity** (`H_kda = (n_heads + n_kv_heads)/2`) |
-| Attention Residuals | `--attn_res` | each sub-layer attends over depth instead of summing into one stream (memory-free reformulation) |
+| Block Attention Residuals | `--attn_res --attn_res_mode block --attn_res_block_size 8` | each sub-layer reads a softmax mixture of the embedding and one summed representation per block of depth; fused kernel with the pre-norm folded in |
+| Gated normalisation | `--gated_norm 16` | low-rank sigmoid gate after each pre-norm and the final norm |
 | Output gate | `--attn_out_gate perhead` | sigmoid gate on attention output, full-attention layers only |
 | SiTU-GLU | `--hidden_act situ_glu` | bounded GLU variant, zero extra parameters |
+| Muon | `--optimizer muon` | Muon on the hidden linear maps (AdamW-matched update scale), AdamW on everything else |
 
-Measured on a controlled three-seed A/B over real COBOL (112M): **−21.9% perplexity at +3.0%
-parameters**, **2.45× faster training** at seq 4096. **No Skylar 2 model has been trained at scale
-yet** — the technical report is in [`docs/PAPER_V2.md`](docs/PAPER_V2.md)
-([PDF](docs/paper/skylar2_paper.pdf)).
+Measured on a 146M proxy with the depth of the 990M (36 layers), 30M tokens of our pre-training
+mixture, three paired seeds: block AttnRes **−0.078** nats of validation cross-entropy against no
+AttnRes, gated normalisation a further **−0.232**, Muon a further **−0.292** (all 3/3 seeds); bits per
+byte **−23%** overall and **−31%** on real COBOL. Depth aggregation has to be ablated at the target
+depth: a sliding-window variant that wins at 12 layers does not train at 36. Against a dense
+Transformer with the same components the hybrid does not save training compute (on an RTX 4090 at
+seq 8192 the dense step is 1.24× faster); it pays off at inference over long inputs: at 32,768 tokens
+its cache per sequence is 3.9× smaller (0.58 vs 2.26 GiB on the 990M), and with several long prompts
+it generates 1.9× more tokens per second. **No Skylar 2 model has been trained at scale yet.**
 
 ```bash
 pip install -r requirements.txt            # includes flash-linear-attention (pinned, MIT)
-python eval/bin.gate_arch_v2.py            # 12 correctness gates (parity with v1, init, cache, doc isolation)
+python eval/bin.gate_arch_v2.py            # 18 correctness gates (v1 parity, init, cache, doc isolation, fused kernel, checkpointing, KDA without CUDA)
 python training/bin.pretrain.py --preset 1B_D --data <tokenized_dir> --tokenizer <tokenizer.json> \
-    --seq_len 8192 --kda_ratio 3:1 --attn_res --attn_out_gate perhead --hidden_act situ_glu \
+    --seq_len 8192 --kda_ratio 3:1 --attn_res --attn_res_mode block --attn_res_block_size 8 \
+    --gated_norm 16 --attn_out_gate perhead --hidden_act situ_glu --optimizer muon --lr 2.3e-4 \
     --doc_masking --dropout 0 --lr_schedule constant --compile --grad_ckpt
 python eval/bin.cache_parity.py --ckpt <out>/last   # cache vs full recompute on a trained checkpoint
+python eval/bin.arch_ablation.py --data <tokenized_dir> --out runs/ablation   # the ablation protocol of the report
 ```
 
 `--doc_masking` is mandatory with recurrent layers (the trainer refuses to start without it): it is
 what stops the recurrent state from crossing document boundaries in packed sequences. The recurrent
-kernels need CUDA. The bits-per-byte tool (`eval/bin.bits_per_byte.py`) ships without its frozen
+kernels use CUDA; without it they run in plain PyTorch (slower, same results). The bits-per-byte tool (`eval/bin.bits_per_byte.py`) ships without its frozen
 evaluation text, which is drawn from our private corpus; only its manifest is public.
 
 <br>
@@ -335,8 +346,8 @@ python training/bin.sft.py \
 ```
 skylar/
 ├── 🧠 models/                     # Model architecture
-│   ├── config.py                  #   NanoTransformerConfig + 15 presets
-│   ├── decoder.py                 #   NanoTransformer (GPT decoder)
+│   ├── config.py                  #   Skylar2Config + presets
+│   ├── decoder.py                 #   Skylar2ForCausalLM (decoder)
 │   ├── embedder.py                #   SkylarEmbedder (bidirectional)
 │   ├── heads.py                   #   Classification + Reward heads
 │   └── layers/
@@ -514,7 +525,7 @@ legal/normative text). Special tokens for chat (`<|im_start|>`, `<|im_end|>`), t
 ## 🔧 Configuration
 
 ```python
-from models.config import get_config, NanoTransformerConfig
+from models.config import get_config, Skylar2Config
 
 # Use a preset
 config = get_config("medium")
@@ -523,7 +534,7 @@ config = get_config("medium")
 config = get_config("medium", vocab_size=40960, dropout=0.05, max_seq_len=32768)
 
 # Full manual config
-config = NanoTransformerConfig(
+config = Skylar2Config(
     vocab_size=40960,
     d_model=768,
     n_heads=12,
@@ -626,17 +637,23 @@ python data/pretrain-pipeline/bin.pretrain_builder.py /path/to/raw_documents \
 Despite being built from scratch, Skylar is fully HuggingFace-native:
 
 ```python
-from models.decoder import NanoTransformer
+from models.decoder import Skylar2ForCausalLM
+from transformers import AutoModelForCausalLM
 
 # Save
 model.save_pretrained("my-skylar-model")
 
-# Load
-model = NanoTransformer.from_pretrained("my-skylar-model")
+# Load (either works: importing models.decoder registers the classes with transformers)
+model = Skylar2ForCausalLM.from_pretrained("my-skylar-model")
+model = AutoModelForCausalLM.from_pretrained("my-skylar-model")
 
-# Push to Hub (native, inherited from PreTrainedModel — the model family is live on the Hub)
-model.push_to_hub("Sophia-AI/skylar-medium")
+# Push to Hub (native, inherited from PreTrainedModel)
+model.push_to_hub("<org>/<model>")
 ```
+
+The class is `Skylar2ForCausalLM` (config `Skylar2Config`, `model_type` `skylar2`). Checkpoints saved
+before 30/09/2026 — the published Skylar-236M and Skylar-980M-Cobol — carry the earlier name
+`NanoTransformer` (`nano-transformer`); both names load them, unchanged.
 
 <br>
 
@@ -672,7 +689,7 @@ provider's CLI (e.g. `runpodctl`), and pull checkpoints back with `utils/bin.dow
 - [x] ⌨️ COBOL code specialist — from-scratch, COBOLEval-validated ([Skylar-980M-Cobol](https://huggingface.co/Skyl4r-Ai/Skylar-980M-Cobol))
 - [x] 📦 Push-to-Hub — native via `PreTrainedModel`; model family live on the Hub
 - [x] 🌐 OpenAI-compatible inference server — ships in the [`skylar`](https://pypi.org/project/skylar/) pip package
-- [x] 🆕 Skylar 2 — hybrid KDA/attention + Attention Residuals + output gate + SiTU-GLU, behind flags ([report](docs/PAPER_V2.md))
+- [x] 🆕 Skylar 2 — hybrid KDA/attention, block Attention Residuals, gated normalisation, Muon, behind flags ([report](docs/PAPER_V2.md))
 - [ ] 🧪 First Skylar 2 model trained at scale (990M), compared head-to-head with Skylar-980M-Cobol
 - [ ] 🔭 Long-context: sliding-window attention + YaRN (for 8K+)
 - [ ] 🎯 Classic DPO (optional; `bin.preference.py` covers the reference-free variants)

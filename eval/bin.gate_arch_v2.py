@@ -3,7 +3,7 @@
 @copyright: A. Ivanovitch | CEO MwSpace | 2026
 =================================================================
 
-Gate automatici per l'architettura v2 (docs/ARCH_V2.md §7).
+Gate automatici per l'architettura Skylar 2 (docs/PAPER_V2.md §4.5).
 
 Un gate non chiede «è meglio?» — per quello serve un run comparativo. Chiede
 «è rotto?», e costa secondi. Qui girano i gate economici:
@@ -80,7 +80,7 @@ def gate_g3_parity(preset, vocab):
         from models_v1.config import get_config as get_v1          # noqa: E402
         from models_v1.decoder import NanoTransformer as Net_v1    # noqa: E402
         from models.config import get_config as get_v2
-        from models.decoder import NanoTransformer as Net_v2
+        from models.decoder import Skylar2ForCausalLM as Net_v2
 
         torch.manual_seed(1234)
         c1 = get_v1(preset, vocab_size=vocab); c1.max_seq_len = 256; c1.dropout = 0.0
@@ -118,11 +118,12 @@ def gate_g5_init_coverage(preset, vocab):
     o riceve l'init standard senza che nessuno se ne accorga.
     """
     from models.config import get_config
-    from models.decoder import NanoTransformer
+    from models.decoder import Skylar2ForCausalLM
 
-    cfg = get_config(preset, vocab_size=vocab, attn_out_gate=True, hidden_act="situ_glu")
+    cfg = get_config(preset, vocab_size=vocab, attn_out_gate=True, hidden_act="situ_glu",
+                     gated_norm=16, attn_res=True, attn_res_mode="block", attn_res_block_size=2)
     cfg.max_seq_len = 256
-    m = NanoTransformer(cfg)
+    m = Skylar2ForCausalLM(cfg)
 
     depth_scaled = [n for n, _ in m.named_parameters()
                     if n.endswith("W_o.weight") or n.endswith("w2.weight")]
@@ -153,12 +154,12 @@ def gate_g5_init_coverage(preset, vocab):
 def gate_g3b_param_count(preset, vocab):
     """Il costo misurato di ogni componente coincide col budget calcolato."""
     from models.config import get_config
-    from models.decoder import NanoTransformer
+    from models.decoder import Skylar2ForCausalLM
 
     def count(**kw):
         cfg = get_config(preset, vocab_size=vocab, **kw)
         cfg.max_seq_len = 256
-        return sum(p.numel() for p in NanoTransformer(cfg).parameters())
+        return sum(p.numel() for p in Skylar2ForCausalLM(cfg).parameters())
 
     base = count()
     d, L, H, dh = (lambda c: (c.d_model, c.n_layers, c.n_heads, c.d_head))(
@@ -173,11 +174,18 @@ def gate_g3b_param_count(preset, vocab):
     report("G3b output gate (formula)", got == L * per_layer,
            f"{got:+,} su {L} layer = {per_layer:+,}/layer, come calcolato")
 
+    # GatedNorm: 2 norm per layer + quella finale, ognuna con W_down (d×r) e W_up (r×d).
+    r = 16
+    got = count(gated_norm=r) - base
+    expected = (2 * L + 1) * 2 * d * r
+    report("G3b GatedNorm (formula)", got == expected,
+           f"{got:+,} = (2·{L}+1) norm × 2·{d}·{r}")
+
     # Cablaggio dell'ibrido: quanti layer ricorrenti esistono DAVVERO nel modello,
     # contro quanti ne chiede il config. Finché KDA non è implementato sono 0.
     cfg = get_config(preset, vocab_size=vocab, kda_ratio="3:1")
     cfg.max_seq_len = 256
-    m = NanoTransformer(cfg)
+    m = Skylar2ForCausalLM(cfg)
     built = sum(1 for mod in m.modules() if type(mod).__name__ == "SkylarKDA")
     chiesti = cfg.n_kda_layers
     if built == 0 and chiesti > 0:
@@ -259,7 +267,7 @@ def gate_g9_hybrid_cache(preset, vocab):
     """
     import torch as t
     from models.config import get_config
-    from models.decoder import NanoTransformer
+    from models.decoder import Skylar2ForCausalLM
 
     if not t.cuda.is_available():
         report("G9 cache ibrida", False, "i kernel KDA richiedono CUDA", todo=True)
@@ -281,12 +289,15 @@ def gate_g9_hybrid_cache(preset, vocab):
     # la differenza è rumore (0.74% sul `medium`, 4.6e-7 in fp32) — sul preset `test` usciva 0
     # per caso. In fp32 la soglia può restare severa. KDA resta in bf16: i kernel lo richiedono.
     for tag, kw, tol, dt in (("attention", {}, 1e-5, t.float32),
-                             ("ibrido", dict(kda_ratio="3:1"), 0.02, t.bfloat16)):
+                             ("ibrido", dict(kda_ratio="3:1"), 0.02, t.bfloat16),
+                             ("ibrido+AttnRes blocchi+GN",
+                              dict(kda_ratio="3:1", attn_res=True, attn_res_mode="block",
+                                   attn_res_block_size=2, gated_norm=16), 0.02, t.bfloat16)):
         try:
             cfg = get_config(preset, vocab_size=vocab, **kw)
             cfg.max_seq_len, cfg.dropout = 256, 0.0
             t.manual_seed(7)
-            m = NanoTransformer(cfg).cuda().to(dt).eval()
+            m = Skylar2ForCausalLM(cfg).cuda().to(dt).eval()
             ids = t.randint(0, vocab, (1, 12), device="cuda")
             with t.no_grad():
                 pre = m(ids, use_cache=True)
@@ -301,6 +312,157 @@ def gate_g9_hybrid_cache(preset, vocab):
             report(f"G9 cache {tag}", False, f"{type(e).__name__}: {str(e)[:90]}")
 
 
+def gate_g10_block_attnres(preset, vocab):
+    """
+    G10 — Block AttnRes (Kimi, arXiv 2603.15031 §3.2) fa quello che dice.
+
+    (a) La SEMANTICA: a ogni punto le sorgenti sono l'embedding, la somma di ogni
+        blocco chiuso e la somma parziale del blocco aperto. Controllato contro la
+        definizione scritta a mano, in fp64 su CPU: deve essere esatto.
+    (b) Il KERNEL fuso di fla (con la pre-norm piegata dentro) è accurato ALMENO
+        quanto la forma in torch. Il riferimento è la forma in torch in fp64: una
+        soglia fissa fra due run fp32 misura il rumore di fp32 (su `medium` ~1e-3
+        sui gradienti di alcune pseudo-query, per entrambi), non un errore.
+        Senza KDA e senza maschera di documento, di proposito: i kernel KDA e la
+        FlexAttention non girano in fp64, e KDA amplifica differenze di arrotondamento
+        di 1e-6 fino a ~1e-4. L'ibrido completo lo coprono G9 e G11.
+    """
+    import torch as t
+    from models.layers.attn_res import AttnResMixer, DepthState
+
+    # (a) semantica, blocchi da 3 sotto-layer, 8 uscite
+    emb = t.randn(2, 5, 4, dtype=t.float64)
+    ys = [t.randn(2, 5, 4, dtype=t.float64) for _ in range(8)]
+    st = DepthState(emb, "block", 3)
+    ok, bs = True, 3
+    for i, y in enumerate(ys, 1):
+        st.push(y)
+        closed = [sum(ys[j * bs:(j + 1) * bs]) for j in range(i // bs)]
+        rest = ys[(i // bs) * bs:i]
+        expect = [emb] + closed + ([sum(rest)] if rest else [])
+        got = st.sources()
+        ok &= len(got) == len(expect) and all(t.equal(a, b) for a, b in zip(got, expect))
+    report("G10 semantica dei blocchi", ok,
+           "embedding + somme dei blocchi chiusi + parziale, esatto a ogni passo" if ok
+           else "le sorgenti non coincidono con la definizione")
+
+    if not t.cuda.is_available():
+        report("G10 kernel fuso vs fp64", False, "il kernel fla richiede CUDA", todo=True)
+        return
+    from models.config import get_config
+    from models.decoder import Skylar2ForCausalLM
+    cfg = get_config(preset, vocab_size=vocab, attn_res=True,
+                     attn_res_mode="block", attn_res_block_size=2, gated_norm=16)
+    cfg.max_seq_len, cfg.dropout = 256, 0.0
+    t.manual_seed(11)
+    m = Skylar2ForCausalLM(cfg).cuda().train()
+    for mod in m.modules():                 # pseudo-query non nulle: pesi di profondità non uniformi
+        if isinstance(mod, AttnResMixer):
+            t.nn.init.normal_(mod.query, std=0.5)
+    ids = t.randint(0, vocab, (2, 64), device="cuda")
+
+    def run(dtype, fused):
+        AttnResMixer.use_fused = fused
+        mm = m.to(dtype)
+        mm.zero_grad(set_to_none=True)
+        out = mm(ids, labels=ids)
+        out["loss"].backward()
+        return (out["logits"].detach().double(),
+                {n: p.grad.detach().double().clone() for n, p in mm.named_parameters()
+                 if p.grad is not None})
+
+    try:
+        l64, g64 = run(t.float64, False)
+        lt, gt = run(t.float32, False)
+        lf, gf = run(t.float32, True)
+    finally:
+        AttnResMixer.use_fused = True
+        m.float()
+    rel = lambda a, b: ((a - b).norm() / (b.norm() + 1e-30)).item()
+    lt_e, lf_e = rel(lt, l64), rel(lf, l64)
+    gt_e = max(rel(gt[n], g64[n]) for n in g64)
+    gf_e = max(rel(gf[n], g64[n]) for n in g64)
+    ok = lf_e <= 2 * lt_e + 1e-7 and gf_e <= 2 * gt_e + 1e-7
+    report("G10 kernel fuso vs fp64", ok,
+           f"errore sui logit fuso {lf_e:.1e} / torch {lt_e:.1e} · "
+           f"gradiente peggiore fuso {gf_e:.1e} / torch {gt_e:.1e}")
+
+
+def gate_g11_checkpoint_grads(preset, vocab):
+    """
+    G11 — il gradient checkpointing non cambia i gradienti con Block AttnRes + GatedNorm.
+
+    Il checkpoint riesegue ogni blocco nel backward partendo da una fotografia dello
+    stato di profondità: se la fotografia è sbagliata (stato già avanzato, blocco
+    chiuso contato due volte) il ricalcolo legge sorgenti diverse e i gradienti
+    cambiano senza nessun errore. Qui devono coincidere.
+    """
+    import torch as t
+    if not t.cuda.is_available():
+        report("G11 checkpoint = senza", False, "i kernel KDA richiedono CUDA", todo=True)
+        return
+    from models.config import get_config
+    from models.decoder import Skylar2ForCausalLM
+    cfg = get_config(preset, vocab_size=vocab, kda_ratio="3:1", attn_res=True,
+                     attn_res_mode="block", attn_res_block_size=3, gated_norm=16)
+    cfg.max_seq_len, cfg.dropout = 256, 0.0
+    t.manual_seed(5)
+    m = Skylar2ForCausalLM(cfg).cuda().float().train()
+    ids = t.randint(0, vocab, (2, 64), device="cuda")
+    doc = t.zeros_like(ids); doc[:, 20:] = 1
+
+    def grads(ckpt):
+        m.gradient_checkpointing = ckpt
+        m.zero_grad(set_to_none=True)
+        m(ids, labels=ids, document_ids=doc)["loss"].backward()
+        return {n: p.grad.detach().clone() for n, p in m.named_parameters() if p.grad is not None}
+
+    g0, g1 = grads(False), grads(True)
+    m.gradient_checkpointing = False
+    worst = max(((g0[n] - g1[n]).abs().max() / (g0[n].abs().max() + 1e-12)).item() for n in g0)
+    same_keys = set(g0) == set(g1)
+    report("G11 checkpoint = senza", same_keys and worst < 1e-5,
+           f"{len(g0)} tensori di gradiente · differenza relativa massima {worst:.1e}")
+
+
+def gate_g12_kda_torch(preset, vocab):
+    """KDA in PyTorch (`kda_torch`, the CPU/MPS path) = the Triton kernels of fla, on the same weights:
+    prefill, one decode step from the cache, and varlen with two documents."""
+    import torch as t
+    if not t.cuda.is_available():
+        report("G12 KDA PyTorch = kernel", False, "i kernel KDA richiedono CUDA", todo=True)
+        return
+    from models.config import get_config
+    from models.layers.kda import SkylarKDA
+    cfg = get_config(preset, vocab_size=vocab, kda_ratio="3:1")
+    t.manual_seed(7)
+    layer = SkylarKDA(cfg, layer_idx=0).cuda().float().eval()
+    with t.no_grad():
+        layer.A_log.add_(t.randn_like(layer.A_log) * 0.5)      # gate lontano dall'init
+        layer.dt_bias.add_(t.randn_like(layer.dt_bias) * 0.5)
+    x = t.randn(2, 97, cfg.d_model, device="cuda") * 0.5
+    x1 = t.randn(2, 1, cfg.d_model, device="cuda") * 0.5
+    xv = t.randn(1, 80, cfg.d_model, device="cuda") * 0.5
+    cu = t.tensor([0, 33, 80], dtype=t.int32, device="cuda")
+
+    def run(kernels):
+        SkylarKDA.use_kernels = kernels
+        try:
+            with t.no_grad():
+                o, c = layer(x, use_cache=True)
+                o1, c1 = layer(x1, kv_cache=c, use_cache=True)
+                ov, _ = layer(xv, cu_seqlens=cu)
+        finally:
+            SkylarKDA.use_kernels = True
+        return o, c[0], o1, c1[0], ov
+
+    ref, got = run(True), run(False)
+    rel = [((g - r).norm() / r.norm()).item() for g, r in zip(got, ref)]
+    report("G12 KDA PyTorch = kernel", max(rel) < 5e-3,
+           "errore relativo prefill {:.1e} · stato {:.1e} · decode {:.1e} · stato {:.1e} · "
+           "varlen {:.1e} (soglia 5e-3: precisione interna dei kernel)".format(*rel))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--preset", default="test")
@@ -313,6 +475,9 @@ def main():
     gate_g3b_param_count(args.preset, args.vocab)
     gate_g2_document_isolation(args.preset, args.vocab)
     gate_g9_hybrid_cache(args.preset, args.vocab)
+    gate_g10_block_attnres(args.preset, args.vocab)
+    gate_g11_checkpoint_grads(args.preset, args.vocab)
+    gate_g12_kda_torch(args.preset, args.vocab)
 
     done = [r for r in results if r is not None]
     todo = len(results) - len(done)

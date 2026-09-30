@@ -17,7 +17,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from .norm import RMSNorm
+from .norm import make_norm
 from .attention import CausalSelfAttention
 from .ffn import FeedForward
 from .attn_res import AttnResMixer
@@ -30,7 +30,7 @@ class TransformerBlock(nn.Module):
         x → RMSNorm → Attention → residual
           → RMSNorm → SwiGLU FFN → residual
 
-    v2 (docs/ARCH_V2.md): il layer di mixing temporale può essere **attention** o
+    Skylar 2 (docs/PAPER_V2.md §3): il layer di mixing temporale può essere **attention** o
     **KDA ricorrente**, scelto da `config.layer_types[layer_idx]`; e il residual
     stream può essere sostituito da **AttnRes**. Entrambi sono opt-in — con
     `layer_idx=None` (il default) il blocco è esattamente quello v1, che è ciò che
@@ -46,7 +46,7 @@ class TransformerBlock(nn.Module):
     def __init__(self, config: object, layer_idx: int | None = None) -> None:
         super().__init__()
         self.layer_idx = layer_idx
-        self.ln1 = RMSNorm(config.d_model)
+        self.ln1 = make_norm(config)
 
         types = getattr(config, "layer_types", None)
         self.layer_type = "attention" if (layer_idx is None or not types) else types[layer_idx]
@@ -56,22 +56,28 @@ class TransformerBlock(nn.Module):
         else:
             self.attn = CausalSelfAttention(config)
 
-        self.ln2 = RMSNorm(config.d_model)
+        self.ln2 = make_norm(config)
         self.ffn = FeedForward(config)
 
         # AttnRes: due punti di applicazione per blocco (prima dell'attention e
         # prima della FFN). Il terzo, alla fine di tutto, sta nel decoder.
         self.attn_res = bool(getattr(config, "attn_res", False))
         if self.attn_res:
-            w = getattr(config, "attn_res_block", None)
-            window = None if not w else 2 * w + 1
+            # La finestra esiste solo nella variante `window`: in `block` e `full`
+            # le sorgenti le decide DepthState, il mixer le pesa tutte.
+            window = None
+            if getattr(config, "attn_res_mode", "block") == "window":
+                w = getattr(config, "attn_res_block", None)
+                window = None if not w else 2 * w + 1
             # Il primo punto in assoluto vede UNA sola sorgente (gli embedding): la
             # softmax su un elemento vale 1.0 qualunque sia la query, quindi quei 2·d
             # parametri non possono ricevere gradiente. Crearli comunque significa
             # parametri morti — e in DDP un parametro senza gradiente e' un errore,
             # non un dettaglio estetico.
-            self.res_attn = None if layer_idx == 0 else AttnResMixer(config.d_model, window=window)
-            self.res_ffn = AttnResMixer(config.d_model, window=window)
+            rms_plus_eps = window is not None
+            self.res_attn = (None if layer_idx == 0 else
+                             AttnResMixer(config.d_model, window=window, rms_plus_eps=rms_plus_eps))
+            self.res_ffn = AttnResMixer(config.d_model, window=window, rms_plus_eps=rms_plus_eps)
 
     def forward(
         self,
@@ -81,7 +87,7 @@ class TransformerBlock(nn.Module):
         attention_mask: torch.Tensor | None = None,
         use_cache: bool = False,
         cu_seqlens: torch.Tensor | None = None,
-        residuals: list | None = None,
+        depth: object | None = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         """
         Args:
@@ -93,7 +99,8 @@ class TransformerBlock(nn.Module):
             cu_seqlens:     confini dei documenti impacchettati. Per l'attention è
                             ridondante (c'è la block_mask); per KDA è l'UNICO modo
                             di impedire allo stato di attraversare i documenti.
-            residuals:      lista delle sorgenti AttnRes. Se None → residual stream v1.
+            depth:          `DepthState` di AttnRes (le sorgenti lungo la profondità).
+                            Se None → residual stream v1.
 
         Returns:
             (hidden_states, cache | None)
@@ -105,18 +112,19 @@ class TransformerBlock(nn.Module):
             # firma e romperebbe i tre modelli discriminativi che la condividono.
             kw["cu_seqlens"] = cu_seqlens
 
-        if residuals is None:
+        if depth is None:
             attn_out, new_cache = self.attn(self.ln1(x), **kw)
             x = x + attn_out
             x = x + self.ffn(self.ln2(x))
             return x, new_cache
 
         # AttnRes: il residual stream non è più una somma. Ogni punto sceglie da
-        # quale profondità leggere, e l'uscita di ogni sotto-layer diventa una
-        # sorgente nuova invece di essere sommata a un accumulatore.
-        h = residuals[-1] if self.res_attn is None else self.res_attn(residuals)
-        attn_out, new_cache = self.attn(self.ln1(h), **kw)
-        residuals.append(attn_out)
-        ffn_out = self.ffn(self.ln2(self.res_ffn(residuals)))
-        residuals.append(ffn_out)
+        # quale profondità leggere, e l'uscita di ogni sotto-layer entra nello stato
+        # (come sorgente nuova, o nella somma del blocco aperto).
+        src = depth.sources()
+        h = self.ln1(src[-1]) if self.res_attn is None else self.res_attn.mix(src, self.ln1)
+        attn_out, new_cache = self.attn(h, **kw)
+        depth.push(attn_out)
+        ffn_out = self.ffn(self.res_ffn.mix(depth.sources(), self.ln2))
+        depth.push(ffn_out)
         return ffn_out, new_cache

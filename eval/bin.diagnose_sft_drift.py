@@ -25,7 +25,7 @@ import torch.nn.functional as F
 from tokenizers import Tokenizer
 
 # Assumes these are in the same directory or PYTHONPATH
-from models.decoder import NanoTransformer
+from models.decoder import Skylar2ForCausalLM
 from utils.chatML import encode_chatml, create_loss_mask, get_chatml_ids
 
 
@@ -35,8 +35,8 @@ def separator(title: str) -> None:
     print(f"{'=' * 70}")
 
 
-def load_model(path: str, device: str) -> tuple[NanoTransformer, Tokenizer]:
-    model = NanoTransformer.from_pretrained(path).to(device).eval()
+def load_model(path: str, device: str) -> tuple[Skylar2ForCausalLM, Tokenizer]:
+    model = Skylar2ForCausalLM.from_pretrained(path).to(device).eval()
     tok_path = Path(path) / "tokenizer.json"
     tokenizer = Tokenizer.from_file(str(tok_path))
     return model, tokenizer
@@ -179,7 +179,7 @@ def test_loss_mask(tokenizer: Tokenizer) -> bool:
 # TEST 3: Catastrophic forgetting
 # ─────────────────────────────────────────────────────────────
 
-def test_forgetting(base_model: NanoTransformer, sft_model: NanoTransformer) -> None:
+def test_forgetting(base_model: Skylar2ForCausalLM, sft_model: Skylar2ForCausalLM) -> None:
     separator("TEST 3: Catastrophic Forgetting Check")
 
     base_params = dict(base_model.named_parameters())
@@ -251,7 +251,7 @@ def test_forgetting(base_model: NanoTransformer, sft_model: NanoTransformer) -> 
 # TEST 4: Model predictions
 # ─────────────────────────────────────────────────────────────
 
-def test_predictions(sft_model: NanoTransformer, tokenizer: Tokenizer,
+def test_predictions(sft_model: Skylar2ForCausalLM, tokenizer: Tokenizer,
                      device: str) -> None:
     separator("TEST 4: Model Predictions on Test Prompt")
 
@@ -320,7 +320,7 @@ def test_predictions(sft_model: NanoTransformer, tokenizer: Tokenizer,
 # TEST 5: Embedding health
 # ─────────────────────────────────────────────────────────────
 
-def test_embedding_health(model: NanoTransformer, label: str) -> None:
+def test_embedding_health(model: Skylar2ForCausalLM, label: str) -> None:
     separator(f"TEST 5: Embedding Health ({label})")
 
     emb = model.token_emb.weight.data

@@ -3,7 +3,7 @@
 @copyright: A. Ivanovitch | CEO MwSpace | 2026
 =================================================================
 
-Output heads for the NanoTransformer.
+Output heads for Skylar2ForCausalLM.
 
 The default LM head (nn.Linear + µP output scaling + weight tying)
 lives directly in decoder.py to preserve HuggingFace checkpoint

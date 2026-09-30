@@ -28,7 +28,7 @@ Due motivi per averlo, molto diversi fra loro:
 L'evidenza pubblica è **DeepSeek-V3, un MoE da 671B**. Non esiste nessuna ablation
 pubblicata a ~1-4B denso, e MTP non compare nel report di Kimi K3. È quindi la
 componente v2 con la giustificazione più debole: sta dietro flag, spenta di
-default, e si decide con una misura nostra (docs/ARCH_V2.md §10.4).
+default, e si decide con una misura nostra (docs/PAPER_V2.md §3.7).
 
 ## Il vincolo di memoria, che è reale
 

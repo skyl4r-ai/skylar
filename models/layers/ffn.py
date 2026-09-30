@@ -10,7 +10,7 @@ Due varianti, scelte da `config.hidden_act`:
   - "situ_glu" (v2)          — SwiGLU con entrambi i fattori illimitati
                                soft-clippati, così l'attivazione è LIMITATA.
 
-Perché SiTU-GLU (docs/ARCH_V2.md §1, punto 3): in SwiGLU sia `w1·x` che `w3·x`
+Perché SiTU-GLU (docs/PAPER_V2.md §3.6): in SwiGLU sia `w1·x` che `w3·x`
 sono illimitati, quindi il prodotto può esplodere e la scala delle attivazioni
 non è nota a priori. SiTU li passa in un tanh scalato:
 

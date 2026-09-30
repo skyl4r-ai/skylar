@@ -3,7 +3,10 @@
 @copyright: A. Ivanovitch | CEO MwSpace | 2026
 =================================================================
 
-Model configuration — HuggingFace compatible.
+Model configuration — HuggingFace compatible: `Skylar2Config`, model_type "skylar2".
+
+`NanoTransformerConfig` (model_type "nano-transformer") is the name of the checkpoints saved before
+30/09/2026 (Skylar-236M, Skylar-980M-Cobol): same fields, same code, kept so they load unchanged.
 
 Supports:
   - Explicit d_head (Qwen3-style) for non-square attention projections
@@ -20,8 +23,8 @@ optimal HPs found on a small proxy transfer to any width.
 from transformers import PretrainedConfig
 
 
-class NanoTransformerConfig(PretrainedConfig):
-    model_type = "nano-transformer"
+class Skylar2Config(PretrainedConfig):
+    model_type = "skylar2"
 
     def __init__(
             self,
@@ -43,13 +46,16 @@ class NanoTransformerConfig(PretrainedConfig):
             eos_token_id=2,
             # µP: set to proxy model width to enable HP transfer
             mup_base_d_model=None,
-            # ── v2 (docs/ARCH_V2.md) — ogni default riproduce il comportamento v1 ──
+            # ── Skylar 2 (docs/PAPER_V2.md) — ogni default riproduce il comportamento v1 ──
             hidden_act="swiglu",
             situ_beta1=4.0,
             situ_beta2=25.0,
             attn_out_gate=False,   # False | "perhead" (consigliato) | "fullrank"
             attn_res=False,
-            attn_res_block=6,
+            attn_res_mode="block",   # "block" (Kimi, Skylar 2) | "full" | "window" (valutata e scartata)
+            attn_res_block_size=8,   # block: sotto-layer per blocco (8 → 9 blocchi sul 990M)
+            attn_res_block=6,        # solo window: S → finestra di 2S+1 sorgenti
+            gated_norm=0,            # rango del gate di GatedNorm sui pre-norm (0 = spento, 16 consigliato)
             layer_types=None,
             kda_ratio=None,
             kda_heads=None,
@@ -93,7 +99,7 @@ class NanoTransformerConfig(PretrainedConfig):
         self.mup_base_d_model = mup_base_d_model
 
         # ── v2 ─────────────────────────────────────────────────────────────
-        # Piano completo, numeri verificati e fonti: docs/ARCH_V2.md.
+        # Architettura, misure e fonti: docs/PAPER_V2.md.
         # Invariante: con questi default il modello è BIT-IDENTICO alla v1
         # (gate G3), così i checkpoint pubblicati si caricano senza toccare
         # il loro config.json — che non contiene nessuno di questi campi.
@@ -104,11 +110,17 @@ class NanoTransformerConfig(PretrainedConfig):
         #   "perhead"  Linear(d, H)          → +18.560 sul 990M
         #   "fullrank" Linear(d, H·d_head)   → +2.359.424
         # Misurate su 5 seed: INDISTINGUIBILI (t=0.61, 4 gdl, il segno cambia fra
-        # seed). A parita' si prende quella che costa 127x meno — vedi PAPER_V2 §8.4.
+        # seed). A parita' si prende quella che costa 127x meno — docs/PAPER_V2.md §3.5.
         self.attn_out_gate = attn_out_gate
         self.attn_res = attn_res                  # attenzione softmax sulla profondità
-        self.attn_res_block = attn_res_block      # S: la forma piena costa 6.94 GiB di
-                                                  # attivazioni vive, S=4-6 ne costa 1.3-1.9
+        # Quali sorgenti vede ogni punto (models/layers/attn_res.py). "window" è stata
+        # valutata e scartata: Kimi la misura quasi inutile (Tab. 4 di 2603.15031), a 36
+        # layer non si addestra e sul 990M costa +62% di step (docs/PAPER_V2.md §6.2-6.3).
+        self.attn_res_mode = attn_res_mode
+        self.attn_res_block_size = attn_res_block_size
+        self.attn_res_block = attn_res_block
+        # GatedNorm (arXiv 2601.22966): gate sigmoid low-rank dopo ln1/ln2/ln_f.
+        self.gated_norm = gated_norm
         self.kda_gate = kda_gate                  # "lowrank" (tiene le teste) | "fullrank"
         self.kda_conv_size = kda_conv_size
         self.nope_on_attention = nope_on_attention
@@ -182,6 +194,12 @@ class NanoTransformerConfig(PretrainedConfig):
         if self.mup_base_d_model is None:
             return 1.0
         return self.d_model / self.mup_base_d_model
+
+
+class NanoTransformerConfig(Skylar2Config):
+    """Name and model_type of the checkpoints saved before 30/09/2026: their config.json says
+    "nano-transformer". Same fields and code as Skylar2Config."""
+    model_type = "nano-transformer"
 
 
 # ── Preset configs ──────────────────────────────────────────
@@ -310,7 +328,7 @@ PRESETS = {
     # ─── 2B — lo scalino intermedio della linea v2 ─────────
     # ~2.09B params (vocab 64000) baseline / ~2.22B con l'architettura v2 | ctx 32K.
     # Non replica un Qwen3: è il gradino fra 1B_D e 4b per validare che la pipeline
-    # scali senza sorprese prima di spendere il 4B (docs/ARCH_V2.md §3).
+    # scali senza sorprese prima di spendere il 4B (docs/PAPER_V2.md §3.2).
     # Vincoli rispettati: d_head=128 come tutta la famiglia da gold in su;
     # H·d_head = d_model → Wq quadrata (come 1B_D); GQA 4:1 (fra il 3:1 del 1B_D e
     # il 4:1 del 4b); d_ff/d_model = 3.50, monotono fra 2.67 (1B_D) e 3.80 (4b);
@@ -416,4 +434,4 @@ PRESETS = {
 def get_config(preset="small", vocab_size=40960, **overrides):
     """Get a preset config with optional overrides."""
     params = {**PRESETS[preset], "vocab_size": vocab_size, **overrides}
-    return NanoTransformerConfig(**params)
+    return Skylar2Config(**params)

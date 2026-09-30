@@ -3,21 +3,33 @@
 @copyright: A. Ivanovitch | skyl4r.ai | 2026
 =================================================================
 
-Costruisce il PDF del technical report da `docs/PAPER_V2.md`.
+Builds an academic-style PDF (preprint layout) from a Markdown paper.
 
-    python docs/build_paper.py                     # -> docs/paper/skylar2_paper.pdf
-    python docs/build_paper.py --src docs/PAPER.md --out docs/paper/skylar1.pdf
+    python3 docs/build_paper.py            # docs/PAPER_V2.md -> docs/paper/skylar2_paper.pdf (+ .html)
 
-Perché uno script e non un comando: le formule. WeasyPrint non fa MathML né LaTeX,
-e in un paper le equazioni rese male si notano prima del contenuto. Le display
-equation sono quindi tradotte a mano in HTML+unicode (dizionario `EQUATIONS`) e
-quelle inline da un traduttore di pattern. Se si aggiunge un'equazione al markdown
-e non la si registra qui, il build **fallisce con un errore esplicito** invece di
-stampare LaTeX grezzo dentro il PDF.
+Layout: serif body (Linux Libertine), numbered sections as written in the Markdown, abstract as an
+indented block, booktabs-style tables, figures from files, running page numbers. No logo, no
+coloured boxes.
+
+Math is typeset with matplotlib's mathtext (Computer Modern), so no TeX installation is needed:
+  $$ ... $$            display equation, numbered automatically
+  $$ ... $$ {#eq:id}   display equation with a label, referenced in the text as [@eq:id]
+  $ ... $              inline math
+mathtext supports a large LaTeX subset (\\frac, \\sqrt, \\sum, \\mathrm, \\odot, \\top, ...). Unsupported
+syntax fails the build instead of printing raw LaTeX.
+
+Front matter: the first lines of the Markdown, before the first `## `, in the form
+  # Title
+  **Authors:** ...
+  **Affiliation:** ...
+  **Date:** ...
+The section `## Abstract` is rendered as the abstract block.
 """
 
 import argparse
+import base64
 import html
+import io
 import os
 import re
 import sys
@@ -26,225 +38,203 @@ import markdown
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# ── Display equation: LaTeX sorgente → HTML reso a mano ──────────────────────
-# La chiave è una sottostringa distintiva dell'equazione nel markdown.
-EQUATIONS = {
-    "S_t = ": (
-        '<span class="eq"><i>S</i><sub>t</sub> = '
-        '( <i>I</i> − β<sub>t</sub> <i>k</i><sub>t</sub> <i>k</i><sub>t</sub><sup>⊤</sup> ) '
-        '· Diag(α<sub>t</sub>) · <i>S</i><sub>t−1</sub> '
-        '+ β<sub>t</sub> <i>k</i><sub>t</sub> <i>v</i><sub>t</sub><sup>⊤</sup></span>'
-    ),
-    "H_{kda}": (
-        '<span class="eq boxed"><i>H</i><sub>kda</sub> = '
-        '<span class="frac"><span class="num">n<sub>heads</sub> + n<sub>kv&nbsp;heads</sub></span>'
-        '<span class="den">2</span></span></span>'
-    ),
-    "k_l = ": (
-        '<span class="eq"><i>k</i><sub>l</sub> = RMSNorm(<i>v</i><sub>l</sub>)'
-        '<span class="sp"></span>'
-        '<i>p</i> = softmax<sub>l</sub>( <i>k</i><sub>l</sub> · <i>q</i> )'
-        '<span class="sp"></span>'
-        '<i>o</i> = Σ<sub>l</sub> <i>p</i><sub>l</sub> <i>v</i><sub>l</sub></span>'
-    ),
-    "\\text{score}_l": (
-        '<span class="eq">score<sub>l</sub> = '
-        '<span class="frac"><span class="num"><i>v</i><sub>l</sub> · <i>wq</i></span>'
-        '<span class="den">rms(<i>v</i><sub>l</sub>)</span></span>'
-        '<span class="sp"></span><i>wq</i> = <i>w</i> ⊙ <i>q</i> '
-        '<span class="note">(precalcolato una volta)</span></span>'
-    ),
-    "\\text{situ}(x)": (
-        '<span class="eq">situ(<i>x</i>) = '
-        'β<sub>1</sub> tanh( <i>W</i><sub>1</sub><i>x</i> / β<sub>1</sub> ) ⊙ '
-        'σ( <i>W</i><sub>1</sub><i>x</i> ) ⊙ '
-        'β<sub>2</sub> tanh( <i>W</i><sub>3</sub><i>x</i> / β<sub>2</sub> )</span>'
-    ),
-    "y = W_o": (
-        '<span class="eq"><i>y</i> = <i>W</i><sub>o</sub> '
-        '[ σ(<i>W</i><sub>g</sub> <i>x</i>) ⊙ RMSNorm(<i>õ</i>) ]</span>'
-    ),
-    "\\mathrm{LR}(N, D)": (
-        '<span class="eq">LR(<i>N</i>, <i>D</i>) = 3×10<sup>−4</sup> · '
-        '( <i>N</i> / 0.98×10<sup>9</sup> )<sup>−0.2219</sup> · '
-        '( <i>D</i> / 20.37×10<sup>9</sup> )<sup>−0.3509</sup></span>'
-    ),
-}
-
-# ── Math inline: pattern → sostituzione ─────────────────────────────────────
-INLINE = [
-    (r"\$2\\,d\\,d_h\\,\(H \+ kv\)\$", "2·<i>d</i>·<i>d</i><sub>h</sub>·(H + kv)"),
-    (r"\$4\\,d\\,d_h\\,H_\{kda\}\$", "4·<i>d</i>·<i>d</i><sub>h</sub>·<i>H</i><sub>kda</sub>"),
-    (r"\$B\{\\cdot\}T = 65\{,\}536\$", "B·T = 65 536"),
-    (r"\$B\{\\cdot\}T = 8192\$", "B·T = 8192"),
-    (r"\$B\{\\cdot\}T\$", "B·T"),
-    (r"\$\[B\{\\cdot\}T, D\]\$", "[B·T, D]"),
-    (r"\$\\beta_1\\beta_2 = 100\$", "β₁β₂ = 100"),
-    (r"\$\\beta_1\{=\}4\$", "β₁ = 4"),
-    (r"\$\\beta_2\{=\}25\$", "β₂ = 25"),
-    (r"\$\\sigma\{=\}0\.05\$", "σ = 0.05"),
-    (r"\$2d\$", "2<i>d</i>"),
-    (r"\$D\$", "<i>D</i>"),
-    (r"\$d\^2\$", "<i>d</i>²"),
-    (r"\$d\$", "<i>d</i>"),
-    (r"\$L\$", "<i>L</i>"),
-    (r"\$H \\cdot d_h = d_\\text\{model\}\$", "H·d<sub>h</sub> = d<sub>model</sub>"),
-    (r"\$d_\{ff\}/d_\\text\{model\} = 3\.50\$", "d<sub>ff</sub>/d<sub>model</sub> = 3.50"),
-    (r"\$d_\{ff\} = 7168 = 56 \\times 128\$", "d<sub>ff</sub> = 7168 = 56×128"),
-    (r"\$L/d\$", "L/d"),
-    (r"\$\\mathcal\{N\}\(0, 0\.02/\\sqrt\{2L\}\)\$", "𝒩(0, 0.02/√(2L))"),
-    (r"\$\\tanh\(z\) \\approx z\$", "tanh(z) ≈ z"),
-    (r"\$1/\\ln 2\$", "1/ln 2"),
-    (r"\$n\$", "<i>n</i>"),
-    (r"\$t\$", "<i>t</i>"),
-    (r"\$S\{=\}4\{-\}6\$", "S = 4–6"),
-    (r"\$\\mathrm\{RMSNorm\}\(v\)\\cdot\(w \\odot q\) = \(v \\cdot wq\)\\,/\\,\\mathrm\{rms\}\(v\)\$",
-     "RMSNorm(v)·(w⊙q) = (v·wq)/rms(v)"),
-]
-
 CSS = """
 @page {
-  size: A4; margin: 21mm 19mm 20mm 19mm;
-  @bottom-center { content: counter(page); font: 8.5pt/1 'DejaVu Serif', serif; color: #8a8a8a; }
-  @top-right { content: "Skylar 2 — technical report"; font: 7.5pt/1 'DejaVu Sans', sans-serif;
-               color: #b4b4b4; letter-spacing: .04em; }
+  size: A4; margin: 24mm 24mm 22mm 24mm;
+  @bottom-center { content: counter(page); font: 9pt/1 'Linux Libertine O', serif; }
 }
-@page :first { @top-right { content: none } @bottom-center { content: none } }
-
-html { font-size: 10pt }
-body { font-family: 'DejaVu Serif', Georgia, serif; line-height: 1.52; color: #17181a;
-       text-align: justify; hyphens: auto; }
-
-h1 { font-family: 'DejaVu Sans', sans-serif; font-size: 20pt; line-height: 1.22; font-weight: 700;
-     letter-spacing: -.015em; margin: 0 0 6mm; text-align: left; hyphens: none; color: #0b0c0e; }
-h2 { font-family: 'DejaVu Sans', sans-serif; font-size: 12.5pt; font-weight: 700; margin: 9mm 0 3mm;
-     padding-bottom: 1.6mm; border-bottom: .6pt solid #d8dade; text-align: left; hyphens: none;
+@page :first { @bottom-center { content: none } }
+html { font-size: 10.5pt }
+body { font-family: 'Linux Libertine O', 'Liberation Serif', serif; line-height: 1.38;
+       color: #000; text-align: justify; hyphens: auto; font-variant-numeric: lining-nums; }
+.title { font-size: 17pt; font-weight: bold; text-align: center; line-height: 1.25; margin: 4mm 6mm 5mm;
+         hyphens: none; }
+.authors { text-align: center; font-size: 11.5pt; margin-bottom: 1mm }
+.affil { text-align: center; font-size: 10pt; font-style: italic; margin-bottom: 1mm }
+.date { text-align: center; font-size: 9.5pt; margin-bottom: 7mm }
+.abstract { margin: 0 11mm 7mm; font-size: 9.6pt; line-height: 1.35 }
+.abstract .head { text-align: center; font-weight: bold; font-size: 10pt; margin-bottom: 1.5mm }
+h2 { font-size: 12pt; font-weight: bold; margin: 6mm 0 2.5mm; text-align: left; hyphens: none;
      break-after: avoid; }
-h3 { font-family: 'DejaVu Sans', sans-serif; font-size: 10.5pt; font-weight: 700; margin: 6mm 0 2mm;
-     text-align: left; hyphens: none; break-after: avoid; color: #26282c; }
-p { margin: 0 0 2.6mm }
-
-a { color: #1a4f9c; text-decoration: none }
-strong { font-weight: 700; color: #000 }
-em { font-style: italic }
-
-code, tt { font-family: 'DejaVu Sans Mono', monospace; font-size: .855em;
-           background: #f2f3f5; padding: .5pt 1.6pt; border-radius: 2px; }
-pre { font-family: 'DejaVu Sans Mono', monospace; font-size: 8pt; line-height: 1.42;
-      background: #f7f8fa; border: .5pt solid #e2e4e8; border-left: 2pt solid #b8bcc4;
-      padding: 2.6mm 3mm; margin: 3mm 0; overflow-x: auto; text-align: left;
-      break-inside: avoid; border-radius: 2px; }
-pre code { background: none; padding: 0; font-size: 1em }
-
-table { width: 100%; border-collapse: collapse; margin: 3mm 0 4mm; font-size: 8.4pt;
-        break-inside: avoid; font-family: 'DejaVu Sans', sans-serif; }
-th { font-weight: 700; text-align: left; border-bottom: .9pt solid #2b2d31; padding: 1.5mm 2mm;
-     background: #fafbfc; }
-td { border-bottom: .4pt solid #e6e8ec; padding: 1.3mm 2mm; vertical-align: top }
-tr:last-child td { border-bottom: .9pt solid #2b2d31 }
-td:not(:first-child), th:not(:first-child) { text-align: right }
-td:first-child, th:first-child { text-align: left }
-
-blockquote { margin: 3.5mm 0; padding: 2.8mm 3.5mm; background: #f6f8fb;
-             border-left: 2.2pt solid #7d97bd; font-size: 9pt; break-inside: avoid;
-             border-radius: 0 2px 2px 0; }
-blockquote p:last-child { margin-bottom: 0 }
-
-ul, ol { margin: 0 0 3mm; padding-left: 5.5mm }
-li { margin-bottom: 1.4mm }
-
-hr { border: none; border-top: .4pt solid #dfe1e5; margin: 6mm 0 }
-
-.eq { display: block; text-align: center; margin: 4mm auto; font-size: 10.5pt;
-      font-family: 'DejaVu Serif', serif; break-inside: avoid; }
-.eq.boxed { border: .7pt solid #2b2d31; padding: 2.2mm 5mm; display: table;
-            margin: 4.5mm auto; border-radius: 2px; background: #fcfcfd; }
-.eq .sp { display: inline-block; width: 9mm }
-.eq .note { font-size: 8.5pt; color: #6a6d73 }
-.frac { display: inline-block; vertical-align: middle; text-align: center; margin: 0 1.5mm }
-.frac .num { display: block; padding: 0 1.5mm; border-bottom: .6pt solid #17181a }
-.frac .den { display: block; padding: 0 1.5mm }
-
-/* frontespizio */
-.cover { text-align: center; margin: 0 0 10mm }
-.cover .logo { width: 26mm; margin: 6mm auto 8mm; display: block }
-.cover .title { font-family: 'DejaVu Sans', sans-serif; font-size: 21pt; font-weight: 700;
-                line-height: 1.2; letter-spacing: -.02em; margin: 0 auto 5mm; max-width: 150mm;
-                text-align: center; hyphens: none; }
-.cover .authors { font-family: 'DejaVu Sans', sans-serif; font-size: 10.5pt; margin-bottom: 1.5mm }
-.cover .affil { font-size: 9pt; color: #55585e; margin-bottom: 5mm }
-.cover .meta { font-family: 'DejaVu Sans Mono', monospace; font-size: 8pt; color: #7a7d83;
-               letter-spacing: .02em }
-.cover .rule { width: 30mm; border-top: 1pt solid #17181a; margin: 7mm auto }
-/* referenze: rientro sporgente, come si usa */
-h2#references + p { font-size: 8.6pt; line-height: 1.42; text-align: left; hyphens: none }
-h2#references + p br { line-height: 2.6 }
-
-h2#abstract { border: none; text-align: center; font-size: 10.5pt; letter-spacing: .1em;
-              text-transform: uppercase; margin-top: 0 }
+h3 { font-size: 10.5pt; font-weight: bold; margin: 4.5mm 0 1.8mm; text-align: left; hyphens: none;
+     break-after: avoid; }
+h4 { font-size: 10.5pt; font-weight: bold; font-style: italic; margin: 3mm 0 1mm; break-after: avoid }
+p { margin: 0 0 2.2mm; orphans: 3; widows: 3 }
+a { color: #000; text-decoration: none }
+code { font-family: 'DejaVu Sans Mono', monospace; font-size: .82em }
+pre { font-family: 'DejaVu Sans Mono', monospace; font-size: 7.8pt; line-height: 1.35;
+      margin: 2.5mm 4mm; text-align: left; break-inside: avoid; white-space: pre-wrap }
+ul, ol { margin: 0 0 2.4mm; padding-left: 6mm }
+li { margin-bottom: .8mm }
+blockquote { margin: 2.5mm 6mm; font-size: 9.6pt }
+table { border-collapse: collapse; margin: 1.5mm auto 4mm; font-size: 8.8pt; break-inside: avoid;
+        border-top: 1pt solid #000; border-bottom: 1pt solid #000; }
+th { font-weight: bold; border-bottom: .6pt solid #000; padding: 1.1mm 2.4mm; text-align: left;
+     vertical-align: bottom }
+td { padding: .8mm 2.4mm; text-align: left; vertical-align: top }
+td[style*="right"], th[style*="right"] { white-space: nowrap }
+.caption { font-size: 9pt; margin: 3mm 3mm 1mm; text-align: justify; break-after: avoid }
+.caption b { font-weight: bold }
+.fig { text-align: center; margin: 3mm 0 1mm; break-inside: avoid }
+.fig img { max-width: 100%; }
+.figcap { font-size: 9pt; margin: 1mm 3mm 4mm; text-align: justify }
+.eq { display: table; width: 100%; margin: 2.2mm 0; break-inside: avoid }
+.eq .body { display: table-cell; text-align: center; vertical-align: middle }
+.eq .num { display: table-cell; width: 10mm; text-align: right; vertical-align: middle; font-size: 10pt }
+img.im { vertical-align: middle }
+.refs p { font-size: 8.8pt; line-height: 1.3; padding-left: 5mm; text-indent: -5mm; margin-bottom: 1.2mm;
+          text-align: left; hyphens: none }
+hr { border: none; border-top: .5pt solid #000; margin: 5mm 0 }
 """
 
+_EQ_COUNTER = [0]
+_EQ_LABELS = {}
 
-def convert_math(md: str) -> str:
-    """Sostituisce display e inline math con HTML reso a mano."""
-    # display: $$...$$ su una o più righe
-    def _display(m):
-        body = m.group(1)
-        for key, repl in EQUATIONS.items():
-            if key in body:
-                return repl
-        raise SystemExit(
-            f"\nEquazione non registrata in EQUATIONS di docs/build_paper.py:\n\n  {body.strip()}\n\n"
-            "Aggiungila (con la sua resa HTML) invece di lasciare che il PDF stampi LaTeX grezzo."
-        )
-    md = re.sub(r"\$\$(.+?)\$\$", _display, md, flags=re.S)
-    for pat, repl in INLINE:
-        md = re.sub(pat, repl, md)
-    if "$" in re.sub(r"`[^`]*`", "", md):
-        leftover = [l for l in md.splitlines() if "$" in l and "`" not in l]
-        print(f"⚠ math inline non convertita su {len(leftover)} righe:", file=sys.stderr)
-        for l in leftover[:5]:
-            print("   ", l.strip()[:100], file=sys.stderr)
+
+def _mathtext_svg(tex, size):
+    import matplotlib
+    matplotlib.use("svg")
+    import matplotlib.pyplot as plt
+    matplotlib.rcParams["mathtext.fontset"] = "cm"
+    matplotlib.rcParams["svg.fonttype"] = "path"
+    fig = plt.figure(figsize=(0.01, 0.01))
+    fig.text(0, 0, f"${tex}$", fontsize=size)
+    buf = io.StringIO()
+    try:
+        fig.savefig(buf, format="svg", bbox_inches="tight", pad_inches=0.012, transparent=True)
+    except Exception as e:
+        raise SystemExit(f"\nmathtext cannot typeset:\n  {tex}\n  ({e})\n")
+    finally:
+        plt.close(fig)
+    svg = buf.getvalue()
+    w = float(re.search(r'width="([\d.]+)pt"', svg).group(1))
+    h = float(re.search(r'height="([\d.]+)pt"', svg).group(1))
+    return svg, w, h
+
+
+def _img(svg, w, h, cls, style=""):
+    b64 = base64.b64encode(svg.encode()).decode()
+    return (f'<img class="{cls}" style="width:{w:.2f}pt;height:{h:.2f}pt;{style}" '
+            f'src="data:image/svg+xml;base64,{b64}">')
+
+
+def convert_math(md):
+    def display(m):
+        tex, label = m.group(1).strip(), m.group(2)
+        _EQ_COUNTER[0] += 1
+        n = _EQ_COUNTER[0]
+        if label:
+            _EQ_LABELS[label] = n
+        svg, w, h = _mathtext_svg(tex, 11.5)
+        return (f'\n\n<div class="eq"><span class="body">{_img(svg, w, h, "dm")}</span>'
+                f'<span class="num">({n})</span></div>\n\n')
+
+    md = re.sub(r"\$\$(.+?)\$\$[ \t]*(?:\{#(eq:[\w-]+)\})?", display, md, flags=re.S)
+
+    def inline(m):
+        svg, w, h = _mathtext_svg(m.group(1), 10.5)
+        return _img(svg, w, h, "im", "vertical-align:-0.25em")
+
+    # inline $...$ (not inside code spans): protect code spans first
+    codes = []
+
+    def keep(m):
+        codes.append(m.group(0))
+        return f"\x00{len(codes) - 1}\x00"
+
+    md = re.sub(r"`[^`\n]+`", keep, md)
+    md = re.sub(r"(?<![\\$])\$([^$\n]+?)\$", inline, md)
+    md = re.sub(r"\x00(\d+)\x00", lambda m: codes[int(m.group(1))], md)
+    md = re.sub(r"\[@(eq:[\w-]+)\]", lambda m: f"({_EQ_LABELS.get(m.group(1), '??')})", md)
     return md
 
 
-def build(src, out, title_lines=None):
-    md_text = open(src, encoding="utf-8").read()
+def _inline_md(text):
+    """Markdown inline (corsivo, grassetto, codice) dentro una didascalia HTML."""
+    html_ = markdown.markdown(text)
+    return re.sub(r"^<p>(.*)</p>$", r"\1", html_.strip(), flags=re.S)
 
-    # Il frontespizio si costruisce dalle prime righe e viene rimosso dal corpo.
-    lines = md_text.splitlines()
-    title = lines[0].lstrip("# ").strip()
-    rest = "\n".join(lines[1:])
-    # rimuove le due righe di intestazione autore/data che diventano il frontespizio
-    rest = re.sub(r"^\s*\*\*A\. Ivanovitch\*\*.*?\n.*?\n", "", rest, count=1, flags=re.S)
-    rest = rest.lstrip("\n-").lstrip()
 
-    body_md = convert_math(rest)
-    body = markdown.markdown(body_md, extensions=["tables", "fenced_code", "attr_list", "sane_lists"])
-    body = body.replace("<h2>Abstract</h2>", '<h2 id="abstract">Abstract</h2>')
-    body = body.replace("<h2>References</h2>", '<h2 id="references">References</h2>')
+def _check_inline_math(md):
+    """Una formula inline non deve andare a capo nel sorgente: altrimenti gli $ si
+    accoppiano male e il resto del paragrafo diventa matematica."""
+    bad = []
+    for n, line in enumerate(md.splitlines(), 1):
+        stripped = re.sub(r"`[^`]*`", "", line).replace("$$", "")
+        if stripped.count("$") % 2:
+            bad.append(f"  riga {n}: {line.strip()[:90]}")
+    if bad:
+        raise SystemExit("Formula inline spezzata su due righe (numero dispari di $):\n" + "\n".join(bad))
 
-    logo = os.path.join(REPO, "docs", "brand", "skylar-logo-light-2048.png")
-    logo_tag = f'<img class="logo" src="file://{logo}">' if os.path.exists(logo) else ""
 
-    cover = f"""<div class="cover">
-      {logo_tag}
-      <div class="title">{html.escape(title)}</div>
-      <div class="authors">A. Ivanovitch</div>
-      <div class="affil">skyl4r.ai</div>
-      <div class="rule"></div>
-      <div class="meta">Technical report · 31 July 2026<br>github.com/skyl4r-ai/skylar</div>
-    </div>"""
+def figures(md, src_dir):
+    """![caption](path) on its own line -> centred figure with numbered caption."""
+    n = [0]
 
-    doc = f"<!doctype html><html><head><meta charset='utf-8'><style>{CSS}</style></head>" \
-          f"<body>{cover}{body}</body></html>"
+    def fig(m):
+        n[0] += 1
+        cap, path = m.group(1), m.group(2)
+        full = path if os.path.isabs(path) else os.path.join(src_dir, path)
+        return (f'\n\n<div class="fig"><img src="file://{full}"></div>'
+                f'<div class="figcap"><b>Figure {n[0]}.</b> {_inline_md(cap)}</div>\n\n')
 
+    return re.sub(r"^!\[(.+?)\]\((.+?)\)\s*$", fig, md, flags=re.M)
+
+
+def table_captions(md):
+    """A line `Table: caption` immediately before a table -> numbered caption above it."""
+    n = [0]
+
+    def cap(m):
+        n[0] += 1
+        return f'\n<div class="caption"><b>Table {n[0]}.</b> {_inline_md(m.group(1))}</div>\n'
+
+    return re.sub(r"^Table:\s*(.+)$", cap, md, flags=re.M)
+
+
+def build(src, out):
+    text = open(src, encoding="utf-8").read()
+    head, _, body_md = text.partition("\n## ")
+    body_md = "## " + body_md
+    title = re.search(r"^#\s+(.+)$", head, re.M).group(1).strip()
+    field = lambda k: (re.search(rf"^\*\*{k}:\*\*\s*(.+)$", head, re.M) or [None, ""])[1].strip()
+
+    abstract = ""
+    m = re.match(r"## Abstract\s*\n(.+?)(?=\n## )", body_md, re.S)
+    if m:
+        abstract = m.group(1).strip()
+        body_md = body_md[m.end():]
+
+    # references: one entry per paragraph, whatever the spacing in the source
+    if "## References" in body_md:
+        pre, refs = body_md.split("## References", 1)
+        refs = re.sub(r"\n(?=\[\d+\] )", "\n\n", refs)
+        body_md = pre + "## References" + refs
+
+    src_dir = os.path.dirname(os.path.abspath(src))
+    _check_inline_math(re.sub(r"\$\$.+?\$\$", "", body_md, flags=re.S))
+    body_md = table_captions(figures(convert_math(body_md), src_dir))
+    abstract_html = markdown.markdown(convert_math(abstract))
+    ext = ["tables", "fenced_code", "attr_list", "sane_lists"]
+    body_html = markdown.markdown(body_md, extensions=ext)
+    # references: one paragraph per entry (hanging indent), even if written as one block with line breaks
+    body_html = re.sub(r'(<h2[^>]*>References</h2>)(.*)$',
+                       lambda m: m.group(1) + '<div class="refs">'
+                       + re.sub(r'<br\s*/?>\s*', '</p><p>', m.group(2)) + '</div>', body_html, flags=re.S)
+
+    doc = f"""<!doctype html><html><head><meta charset="utf-8"><style>{CSS}</style></head><body>
+<div class="title">{html.escape(title)}</div>
+<div class="authors">{html.escape(field('Authors'))}</div>
+<div class="affil">{html.escape(field('Affiliation'))}</div>
+<div class="date">{html.escape(field('Date'))}</div>
+<div class="abstract"><div class="head">Abstract</div>{abstract_html}</div>
+{body_html}
+</body></html>"""
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    html_out = out.replace(".pdf", ".html")
+    html_out = out[:-4] + ".html"
     open(html_out, "w", encoding="utf-8").write(doc)
-
     from weasyprint import HTML
-    HTML(string=doc, base_url=REPO).write_pdf(out)
+    HTML(string=doc, base_url=src_dir).write_pdf(out)
     return html_out, out
 
 
@@ -254,4 +244,4 @@ if __name__ == "__main__":
     ap.add_argument("--out", default=os.path.join(REPO, "docs", "paper", "skylar2_paper.pdf"))
     a = ap.parse_args()
     h, p = build(a.src, a.out)
-    print(f"HTML → {h}\nPDF  → {p}  ({os.path.getsize(p)/1024:.0f} KB)")
+    print(f"HTML -> {h}\nPDF  -> {p} ({os.path.getsize(p) / 1024:.0f} KB)")

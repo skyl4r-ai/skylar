@@ -1,5 +1,5 @@
 """
-Generate text from a trained NanoTransformer.
+Generate text from a trained Skylar2ForCausalLM.
 
 Usage:
   # Interactive mode
@@ -18,7 +18,7 @@ import sys
 import torch
 from tokenizers import Tokenizer, decoders
 
-from models.decoder import NanoTransformer
+from models.decoder import Skylar2ForCausalLM
 
 
 def load_model(path, device="auto"):
@@ -31,7 +31,7 @@ def load_model(path, device="auto"):
         else:
             device = "cpu"
 
-    model = NanoTransformer.from_pretrained(path).to(device)
+    model = Skylar2ForCausalLM.from_pretrained(path).to(device)
     model.eval()
 
     tokenizer = Tokenizer.from_file(f"{path}/tokenizer.json")
@@ -68,7 +68,7 @@ def generate_text(model, tokenizer, prompt, device, max_tokens=200,
 
 def interactive_mode(model, tokenizer, device, args):
     """Interactive REPL for text generation."""
-    print(f"\n  🧠 NanoTransformer — Interactive Generation")
+    print(f"\n  🧠 Skylar2ForCausalLM — Interactive Generation")
     print(f"     temperature={args.temperature}, top_k={args.top_k}, "
           f"top_p={args.top_p}, rep_penalty={args.repetition_penalty}, "
           f"max_tokens={args.max_tokens}")
@@ -112,7 +112,7 @@ def interactive_mode(model, tokenizer, device, args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate text with NanoTransformer")
+    parser = argparse.ArgumentParser(description="Generate text with Skylar2ForCausalLM")
     parser.add_argument("--model", type=str, required=True, help="Path to checkpoint")
     parser.add_argument("--prompt", type=str, default=None, help="Input prompt")
     parser.add_argument("--n", type=int, default=1, help="Number of generations")

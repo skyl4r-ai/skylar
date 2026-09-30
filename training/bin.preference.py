@@ -36,8 +36,9 @@ from tokenizers import Tokenizer
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from models.config import get_config
-from models.decoder import NanoTransformer
+from models.decoder import Skylar2ForCausalLM
 from utils.chatML import create_loss_mask
+from training.optim import build_optimizer
 
 
 class PrefDS(Dataset):
@@ -145,6 +146,9 @@ def main():
     ap.add_argument("--max_steps", type=int, default=None)
     ap.add_argument("--batch_size", type=int, default=8)
     ap.add_argument("--lr", type=float, default=8e-6)
+    ap.add_argument("--optimizer", default="adamw", choices=["adamw", "muon"],
+                    help="muon for a base pretrained with Muon (Skylar 2): Muon in pretraining + Muon in post-training "
+                         "is the best pairing (Moonlight 2502.16982, Table 6)")
     ap.add_argument("--warmup_steps", type=int, default=30)
     ap.add_argument("--max_len", type=int, default=512)
     ap.add_argument("--bf16", action="store_true")
@@ -159,11 +163,11 @@ def main():
     dev = args.device
     if args.base_model:
         print(f"Load policy {args.base_model} (loss={args.loss})")
-        model = NanoTransformer.from_pretrained(args.base_model)
+        model = Skylar2ForCausalLM.from_pretrained(args.base_model)
         tok = Tokenizer.from_file(f"{args.base_model}/tokenizer.json")
     else:
         assert args.preset and args.tokenizer
-        model = NanoTransformer(get_config(args.preset, vocab_size=args.vocab_size))
+        model = Skylar2ForCausalLM(get_config(args.preset, vocab_size=args.vocab_size))
         tok = Tokenizer.from_file(args.tokenizer)
     model = model.to(dev).train()
     if args.grad_ckpt and hasattr(model, "gradient_checkpointing_enable"):
@@ -186,7 +190,8 @@ def main():
     total = args.max_steps or len(dl) * args.epochs
     print(f"params={sum(p.numel() for p in model.parameters())/1e6:.1f}M | pairs={len(ds)} | steps={total}")
 
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.0, betas=(0.9, 0.95))
+    opt, opt_info = build_optimizer(model, args.lr, 0.0, args.optimizer)
+    print(f"[opt] {args.optimizer}: {opt_info}")
 
     def lr_at(s):
         if s < args.warmup_steps:

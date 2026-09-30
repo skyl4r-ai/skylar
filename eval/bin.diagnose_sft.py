@@ -263,9 +263,9 @@ def main():
     if args.sft_model:
         print("\n┌─ TEST 7: Analisi logits modello SFT")
 
-        from models.decoder import NanoTransformer
+        from models.decoder import Skylar2ForCausalLM
 
-        model = NanoTransformer.from_pretrained(args.sft_model).to("cuda").eval()
+        model = Skylar2ForCausalLM.from_pretrained(args.sft_model).to("cuda").eval()
 
         # Encode a test prompt
         prompt_ids = encode_chatml([
@@ -338,10 +338,10 @@ def main():
     if args.base_model and args.sft_model:
         print("\n┌─ TEST 8: Confronto embedding pretrain vs SFT")
 
-        from models.decoder import NanoTransformer
+        from models.decoder import Skylar2ForCausalLM
 
-        base = NanoTransformer.from_pretrained(args.base_model)
-        sft = NanoTransformer.from_pretrained(args.sft_model)
+        base = Skylar2ForCausalLM.from_pretrained(args.base_model)
+        sft = Skylar2ForCausalLM.from_pretrained(args.sft_model)
 
         base_emb = base.token_emb.weight.data
         sft_emb = sft.token_emb.weight.data
@@ -417,10 +417,10 @@ def main():
     if args.sft_model and len(ds) > 0:
         print("\n┌─ TEST 10: Loss breakdown su singolo esempio")
 
-        from models.decoder import NanoTransformer
+        from models.decoder import Skylar2ForCausalLM
         import torch.nn.functional as F
 
-        model = NanoTransformer.from_pretrained(args.sft_model).to("cuda").eval()
+        model = Skylar2ForCausalLM.from_pretrained(args.sft_model).to("cuda").eval()
 
         # Find an example that has im_end in labels
         test_sample = None

@@ -37,8 +37,9 @@ from accelerate.utils import set_seed
 from tokenizers import Tokenizer
 
 from models.config import get_config
-from models.decoder import NanoTransformer
+from models.decoder import Skylar2ForCausalLM
 from data.memmap_dataset import MemmapTokenDataset, Prefetcher
+from training.optim import OptimizerSet, build_optimizer
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -274,11 +275,19 @@ def main():
     # passare `--dropout 0` sul pretrain. Da confermare con una misura nostra prima del 4B.
     ap.add_argument("--dropout", type=float, default=None,
                     help="sovrascrive il dropout del preset (0 = spento, consigliato in pretrain)")
-    # ── architettura v2 (docs/ARCH_V2.md). Ogni default = comportamento v1. ──
+    # ── architettura Skylar 2 (docs/PAPER_V2.md). Ogni default = comportamento v1. ──
     ap.add_argument("--kda_ratio", type=str, default=None,
                     help="ibrido ricorrente/attention, es. '3:1'. Richiede --doc_masking")
     ap.add_argument("--attn_res", action="store_true", help="AttnRes: attenzione sulla profondita'")
-    ap.add_argument("--attn_res_block", type=int, default=6, help="finestra AttnRes (2S+1 sorgenti)")
+    ap.add_argument("--attn_res_mode", default="block", choices=["block", "full", "window"],
+                    help="sorgenti di AttnRes: block (Kimi 2603.15031, consigliato) | full | "
+                         "window (valutata e scartata: docs/PAPER_V2.md §6.2-6.3)")
+    ap.add_argument("--attn_res_block_size", type=int, default=8,
+                    help="block: sotto-layer per blocco (8 → 9 blocchi su 36 layer)")
+    ap.add_argument("--attn_res_block", type=int, default=6,
+                    help="solo --attn_res_mode window: finestra di 2S+1 sorgenti")
+    ap.add_argument("--gated_norm", type=int, default=0,
+                    help="GatedNorm (2601.22966) su ln1/ln2/ln_f: rango del gate, 0 = spento, 16 consigliato")
     ap.add_argument("--attn_out_gate", nargs="?", const="fullrank", default=None,
                     choices=["fullrank", "perhead"],
                     help="output gate sui layer full-attention: per canale (fullrank) o per testa")
@@ -289,7 +298,10 @@ def main():
     ap.add_argument("--mtp_loss_weight", type=float, default=None)
     ap.add_argument("--nope", action="store_true",
                     help="NoPE sui layer full-attention. IRREVERSIBILE e non verificabile "
-                         "dalla loss: leggi docs/ARCH_V2.md §10.2 prima di usarlo")
+                         "dalla loss: leggi docs/PAPER_V2.md §3.7 prima di usarlo")
+    ap.add_argument("--optimizer", default="adamw", choices=["adamw", "muon"],
+                    help="muon: Muon (torch.optim.Muon, update RMS allineato ad AdamW) sulle matrici "
+                         "delle mappe lineari nascoste, AdamW su tutto il resto")
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--warmup", type=int, default=2000)
     ap.add_argument("--min_lr_ratio", type=float, default=0.1)
@@ -297,13 +309,23 @@ def main():
     ap.add_argument("--lr_schedule", default="cosine", choices=["cosine", "wsd", "constant"])
     ap.add_argument("--lr_decay_ratio", type=float, default=0.1, help="WSD: last-fraction decay")
     ap.add_argument("--eval_every", type=int, default=1000)
+    ap.add_argument("--log_every", type=int, default=0,
+                    help="scrive train loss/grad norm/lr ogni N step in <out>/train_steps.jsonl "
+                         "(senza validazione; serve agli stress test). 0 = spento")
     ap.add_argument("--ckpt_every", type=int, default=2000)
     ap.add_argument("--milestones", default="", help="comma token marks -> step_tok<N>B snapshots")
     ap.add_argument("--wsm_every_tok", type=float, default=0.0,
                     help="WSM: every N tokens save a WEIGHTS-ONLY snapshot to <out>/wsm/ (merge candidates). "
                          "0=off. Use ~2e9 during the constant-LR burst -> >=8-10 ckpt in the merge-window.")
+    ap.add_argument("--no_checkpoints", action="store_true",
+                    help="esperimenti: niente best/last/milestone e niente stato dell'ottimizzatore; "
+                         "a fine run salva solo i pesi in <out>/final (un decimo dello spazio)")
     ap.add_argument("--grad_ckpt", action="store_true")
     ap.add_argument("--no_prefetch", action="store_true")
+    ap.add_argument("--sampler", default="permutation", choices=["permutation", "random"],
+                    help="permutation: one shuffled pass over the corpus without repeats, resumed exactly "
+                         "from the step (300B tokens of a 502B corpus = 60%% of it, each window once); "
+                         "random: random windows with replacement (45%% of the corpus seen, the rest repeated)")
     ap.add_argument("--compile", action="store_true")
     ap.add_argument("--doc_masking", action="store_true",
                     help="document-masked attention (no cross-document attention in a window)")
@@ -377,6 +399,9 @@ def main():
                                    ("hidden_act", args.hidden_act),
                                    ("attn_res", args.attn_res or None),
                                    ("attn_res_block", args.attn_res_block),
+                                   ("attn_res_mode", args.attn_res_mode if args.attn_res else None),
+                                   ("attn_res_block_size", args.attn_res_block_size if args.attn_res else None),
+                                   ("gated_norm", args.gated_norm or None),
                                    ("attn_out_gate", args.attn_out_gate),
                                    ("nope_on_attention", args.nope or None),
                                    ("mtp_layers", args.mtp_layers),
@@ -386,7 +411,7 @@ def main():
         if hasattr(cfg, attr):
             setattr(cfg, attr, max(args.seq_len, getattr(cfg, attr, 0) or 0))
 
-    model = NanoTransformer(cfg)
+    model = Skylar2ForCausalLM(cfg)
     if args.grad_ckpt and hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable()
     n_params = sum(p.numel() for p in model.parameters())
@@ -394,35 +419,18 @@ def main():
     if getattr(cfg, "mup_base_d_model", None):
         opt = torch.optim.AdamW(model.mup_param_groups(args.lr, args.wd), betas=(0.9, 0.95))
     else:
-        # Il weight decay va SOLO sulle matrici. Fin qui questo ramo passava
-        # `model.parameters()` in blocco, quindi decadeva anche le RMSNorm, i bias e
-        # gli embedding: e' la convenzione sbagliata di GPT-2 in poi (lo split
-        # corretto era gia' in bin.sft.py:649-656, solo qui mancava). Su una norm il
-        # decay la tira verso zero, cioe' verso l'annullare il layer che normalizza.
-        # Nell'ibrido si aggiungono A_log e dt_bias, che `fla` marca
-        # `_no_weight_decay`: governano la DINAMICA del gate di dimenticanza, non la
-        # capacita' — decaderli spinge la ricorrenza verso un decadimento fisso.
-        decay, no_decay = [], []
-        for _n, _p in model.named_parameters():
-            if not _p.requires_grad:
-                continue
-            (no_decay if (_p.dim() < 2 or getattr(_p, "_no_weight_decay", False))
-             else decay).append(_p)
-        opt = torch.optim.AdamW(
-            [{"params": decay, "weight_decay": args.wd},
-             {"params": no_decay, "weight_decay": 0.0}],
-            lr=args.lr, betas=(0.9, 0.95),
-        )
+        # Weight decay SOLO sulle matrici: norm, bias e A_log/dt_bias di KDA esclusi (training/optim.py).
+        # Con --optimizer muon le mappe lineari nascoste passano a Muon, il resto resta su AdamW.
+        opt, opt_info = build_optimizer(model, args.lr, args.wd, args.optimizer)
         if is_main:
-            print(f"[opt] weight decay {args.wd} su {len(decay)} tensori; "
-                  f"{len(no_decay)} esclusi (norm, bias, embedding, A_log/dt_bias)")
+            print(f"[opt] {opt_info}")
 
     # resume: load weights BEFORE prepare (so DDP broadcasts identical weights)
     start_step, tokens_seen, best_val = 0, 0, float("inf")
     resume_dir = (Path(args.out) / "last") if args.resume == "auto" else (Path(args.resume) if args.resume else None)
     resume_state = None
     if resume_dir and (resume_dir / "training_state.pt").exists():
-        model.load_state_dict(NanoTransformer.from_pretrained(str(resume_dir)).state_dict())
+        model.load_state_dict(Skylar2ForCausalLM.from_pretrained(str(resume_dir)).state_dict())
         resume_state = torch.load(resume_dir / "training_state.pt", map_location="cpu", weights_only=False)
         start_step = resume_state["step"]; tokens_seen = resume_state["tokens_seen"]
         best_val = resume_state.get("best_val", float("inf"))
@@ -432,7 +440,11 @@ def main():
     # dynamo's dynamic-shape inference recompiles on step 2.
     if args.compile:
         model = torch.compile(model, dynamic=False)
-    model, opt = accelerator.prepare(model, opt)
+    if isinstance(opt, OptimizerSet):
+        model, *prepared = accelerator.prepare(model, *opt.opts)
+        opt = OptimizerSet(prepared)
+    else:
+        model, opt = accelerator.prepare(model, opt)
     raw_model = accelerator.unwrap_model(model)
     raw_model = getattr(raw_model, "_orig_mod", raw_model)   # strip compile wrapper for save/val
 
@@ -461,10 +473,12 @@ def main():
             print(f"[s3] disabled ({e})", flush=True)
 
     metrics_fp = None
+    steps_fp = None
     use_wandb = False
     if is_main:
         Path(args.out).mkdir(parents=True, exist_ok=True)
         metrics_fp = open(Path(args.out) / "metrics.jsonl", "a")
+        steps_fp = open(Path(args.out) / "train_steps.jsonl", "a") if args.log_every else None
         if args.wandb:
             try:
                 import wandb
@@ -477,7 +491,8 @@ def main():
         print(f"device={device} preset={args.preset} params={n_params/1e6:.1f}M vocab={ds.vocab_size} "
               f"gpus={world} corpus={corpus_tok/1e9:.2f}B seq={args.seq_len} lr_sched={args.lr_schedule} "
               f"doc_mask={use_doc} tok/step={tok_per_step:,} total_steps={total_steps:,} "
-              f"implied_epochs={implied_epochs:.2f}", flush=True)
+              f"implied_epochs={implied_epochs:.2f} sampler={args.sampler}"
+              + (f" windows={ds.n_windows('train'):,}" if args.sampler == "permutation" else ""), flush=True)
 
     def log_metrics(rec):
         if not is_main:
@@ -523,8 +538,12 @@ def main():
     next_wsm = ((tokens_seen // wsm_step) + 1) * wsm_step if wsm_step else 0   # resume-safe: next multiple ahead
     step = start_step - 1
     model.train(); t0 = time.time(); seen0 = tokens_seen; train_secs = 0.0
-    train_pf = None if args.no_prefetch else Prefetcher(ds, "train", args.batch_size, device,
-                                                        seed=args.seed + rank + 100000, **batch_kwargs)
+    # permutation: ONE permutation shared by all ranks (same seed), each rank reads its own slots; the
+    # position is the number of micro-batches already trained, so a resume continues exactly.
+    indexed = args.sampler == "permutation"
+    train_pf = None if args.no_prefetch else Prefetcher(
+        ds, "train", args.batch_size, device, seed=args.seed if indexed else args.seed + rank + 100000,
+        indexed=indexed, start=start_step * args.grad_accum, rank=rank, world=world, **batch_kwargs)
     if train_pf is not None and resume_state is not None and resume_state.get("train_pf_rng") is not None:
         train_pf.set_rng_state(resume_state["train_pf_rng"])
     try:
@@ -536,8 +555,14 @@ def main():
 
             _t_step = time.time()
             loss_accum, grad_norm = torch.zeros((), device=device), 0.0
-            for _ in range(args.grad_accum):
-                batch = train_pf.next() if train_pf is not None else ds.get_batch("train", args.batch_size, device, **batch_kwargs)
+            for micro in range(args.grad_accum):
+                if train_pf is not None:
+                    batch = train_pf.next()
+                elif indexed:
+                    batch = ds.get_batch_at("train", args.batch_size, step * args.grad_accum + micro, device,
+                                            rank=rank, world=world, seed=args.seed, **batch_kwargs)
+                else:
+                    batch = ds.get_batch("train", args.batch_size, device, **batch_kwargs)
                 doc = batch[2] if len(batch) == 3 else None
                 x, y = batch[0], batch[1]
                 with accelerator.accumulate(model):
@@ -551,6 +576,11 @@ def main():
                 loss_accum += loss.detach()        # stay on GPU — one GPU->CPU sync per step
             train_loss = (loss_accum / args.grad_accum).item()
             tokens_seen += tok_per_step
+            if args.log_every and is_main and step % args.log_every == 0:
+                steps_fp.write(json.dumps({"step": step, "tokens": tokens_seen, "lr": lr,
+                                           "train_loss": train_loss, "grad_norm": grad_norm,
+                                           "t": round(time.time(), 3)}) + "\n")
+                steps_fp.flush()
             if step == start_step:
                 seen0, train_secs = tokens_seen, 0.0   # drop compile/warmup step from throughput
             else:
@@ -580,9 +610,10 @@ def main():
                     # all'inferenza viene buttato via insieme alla testa.
                     if vl_ce < best_val:
                         best_val = vl_ce
-                        save_ckpt(Path(args.out) / "best", raw_model, opt, step, tokens_seen, args, best_val, ds, train_pf, s3)
+                        if not args.no_checkpoints:
+                            save_ckpt(Path(args.out) / "best", raw_model, opt, step, tokens_seen, args, best_val, ds, train_pf, s3)
 
-            for m in milestones:
+            for m in ([] if args.no_checkpoints else milestones):
                 if m not in done_ms and tokens_seen >= m:
                     done_ms.add(m)
                     accelerator.wait_for_everyone()
@@ -602,12 +633,12 @@ def main():
                                       tokenizer_path=args.tokenizer, s3=s3)
                     print(f"  [wsm] weights-only snapshot @ {tb:.2f}B tokens (step {step})", flush=True)
 
-            if (step - start_step) > 0 and step % args.ckpt_every == 0:
+            if not args.no_checkpoints and (step - start_step) > 0 and step % args.ckpt_every == 0:
                 accelerator.wait_for_everyone()
                 if is_main:
                     save_ckpt(Path(args.out) / "last", raw_model, opt, step, tokens_seen, args, best_val, ds, train_pf, s3)
     except BaseException as e:        # OOM / OS-kill / Ctrl-C -> save before dying
-        if is_main:
+        if is_main and not args.no_checkpoints:
             print(f"\n[interrupt] {type(e).__name__}: saving last checkpoint ...", flush=True)
             try:
                 save_ckpt(Path(args.out) / "last", raw_model, opt, step + 1, tokens_seen, args, best_val, ds, train_pf, s3)
@@ -621,8 +652,11 @@ def main():
 
     accelerator.wait_for_everyone()
     if is_main:
-        save_ckpt(Path(args.out) / "last", raw_model, opt, min(step + 1, total_steps), tokens_seen, args, best_val, ds, train_pf, s3)
-        save_ckpt(Path(args.out) / "final", raw_model, opt, total_steps, tokens_seen, args, best_val, ds, train_pf, s3)
+        if args.no_checkpoints:
+            raw_model.save_pretrained(str(Path(args.out) / "final"))
+        else:
+            save_ckpt(Path(args.out) / "last", raw_model, opt, min(step + 1, total_steps), tokens_seen, args, best_val, ds, train_pf, s3)
+            save_ckpt(Path(args.out) / "final", raw_model, opt, total_steps, tokens_seen, args, best_val, ds, train_pf, s3)
         try:
             Tokenizer.from_file(args.tokenizer).save(str(Path(args.out) / "final" / "tokenizer.json"))
         except Exception:

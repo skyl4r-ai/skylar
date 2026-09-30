@@ -23,7 +23,7 @@ from pathlib import Path
 
 
 class LocalGenerator:
-    """Lazily-loaded local NanoTransformer sampler (batch-1 generate). Framework-native: reuses
+    """Lazily-loaded local Skylar2ForCausalLM sampler (batch-1 generate). Framework-native: reuses
     models.decoder + utils.chatML. Takes ChatML `messages` and returns `n` decoded completions."""
     def __init__(self, model_dir, max_new_tokens=900, temperature=0.8, top_k=50):
         self.model_dir, self.max_new_tokens = model_dir, max_new_tokens
@@ -32,11 +32,11 @@ class LocalGenerator:
 
     def _load(self):
         import torch
-        from models.decoder import NanoTransformer
+        from models.decoder import Skylar2ForCausalLM
         from tokenizers import Tokenizer
         from utils.chatML import encode_chatml
         self.dev = "cuda" if torch.cuda.is_available() else "cpu"
-        self.model = NanoTransformer.from_pretrained(self.model_dir).to(self.dev).eval()
+        self.model = Skylar2ForCausalLM.from_pretrained(self.model_dir).to(self.dev).eval()
         self.tok = Tokenizer.from_file(str(Path(self.model_dir) / "tokenizer.json"))
         self.enc = encode_chatml
         self.eos = self.tok.token_to_id("<|im_end|>")
@@ -51,7 +51,7 @@ class LocalGenerator:
         outs = []
         amp = (self.dev == "cuda")
         with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=amp):
-            for _ in range(n):                          # batch-1 generate (NanoTransformer limit)
+            for _ in range(n):                          # batch-1 generate (Skylar2ForCausalLM limit)
                 out = self.model.generate(x, max_new_tokens=self.max_new_tokens,
                                           temperature=self.temperature, top_k=self.top_k,
                                           eos_token_id=self.eos)

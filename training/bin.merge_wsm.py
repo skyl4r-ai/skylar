@@ -30,8 +30,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
-from models.config import NanoTransformerConfig
-from models.decoder import NanoTransformer
+from models.config import Skylar2Config
+from models.decoder import Skylar2ForCausalLM
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -162,8 +162,8 @@ def main():
         del sd
     merged = {k: (acc[k].to(out_dtype[k]) if acc[k].is_floating_point() else acc[k]) for k in acc}
 
-    cfg = NanoTransformerConfig.from_pretrained(dirs[0])
-    model = NanoTransformer(cfg)
+    cfg = Skylar2Config.from_pretrained(dirs[0])
+    model = Skylar2ForCausalLM(cfg)
     missing, unexpected = model.load_state_dict(merged, strict=False)
     if missing or unexpected:
         # tied lm_head (weight-tied to token_emb for <8b) legitimately isn't in the state_dict — tolerate it,
@@ -195,7 +195,7 @@ def main():
 
     if args.verify:
         del model, acc, merged
-        m2 = NanoTransformer.from_pretrained(str(out))
+        m2 = Skylar2ForCausalLM.from_pretrained(str(out))
         # I layer KDA (v2) girano solo su CUDA: kernel Triton, nessun fallback CPU.
         dev = "cuda" if torch.cuda.is_available() else "cpu"
         m2.to(dev).eval()

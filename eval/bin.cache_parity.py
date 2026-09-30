@@ -18,7 +18,7 @@ from pathlib import Path
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from models.decoder import NanoTransformer  # noqa: E402
+from models.decoder import Skylar2ForCausalLM  # noqa: E402
 
 
 def run(model, ids, steps, dtype):
@@ -51,7 +51,7 @@ def main():
     from tokenizers import Tokenizer
     tok = Tokenizer.from_file(args.tokenizer or str(Path(args.ckpt) / "tokenizer.json"))
     bos = tok.token_to_id("<bos>")
-    model = NanoTransformer.from_pretrained(args.ckpt).cuda().eval()
+    model = Skylar2ForCausalLM.from_pretrained(args.ckpt).cuda().eval()
     ids = torch.tensor([([bos] if bos is not None else []) + tok.encode(args.prompt).ids], device="cuda")
 
     ok = True

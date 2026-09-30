@@ -3,7 +3,13 @@
 @copyright: A. Ivanovitch | CEO MwSpace | 2026
 =================================================================
 
-GPT-style decoder-only Transformer — PyTorch + HuggingFace.
+Skylar 2 decoder-only Transformer — PyTorch + HuggingFace: `Skylar2ForCausalLM` (text only, hence
+`ForCausalLM`: it predicts the next token; `ForConditionalGeneration` is for encoder-decoder and
+multimodal models). With every Skylar 2 option off it is the v1 decoder, bit for bit.
+
+`NanoTransformer` is the name of the checkpoints saved before 30/09/2026 (Skylar-236M, Skylar-980M-Cobol):
+same code, kept so they load unchanged. Both names are registered with transformers, so
+`AutoModelForCausalLM.from_pretrained(path)` opens either, once this module is imported.
 
 Every component is written explicitly (no nn.TransformerDecoder),
 so you can see, modify, and learn from every line.
@@ -23,27 +29,27 @@ import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import PreTrainedModel, __version__ as _tf_version
+from transformers import PreTrainedModel, PretrainedConfig, __version__ as _tf_version
 
-from models.config import NanoTransformerConfig
+from models.config import NanoTransformerConfig, Skylar2Config
 from models.layers.block import TransformerBlock
-from models.layers.norm import RMSNorm
+from models.layers.norm import make_norm
 from models.layers.attention import (
     HAS_FLEX_ATTENTION,
     build_cu_seqlens,
     create_document_block_mask,
     make_packing_mask,
 )
-from models.layers.attn_res import AttnResMixer
+from models.layers.attn_res import AttnResMixer, DepthState
 from models.layers.kv_cache import validate_kv_cache
 from models.mtp import MTPModule
 
 logger = logging.getLogger(__name__)
 
 
-class NanoTransformer(PreTrainedModel):
+class Skylar2ForCausalLM(PreTrainedModel):
     """
-    GPT-style Decoder-Only Transformer.
+    Skylar 2 decoder-only Transformer (docs/PAPER_V2.md; with the options off, the v1 decoder of docs/PAPER.md).
 
     Modern architecture choices:
       - RMSNorm (instead of LayerNorm)
@@ -72,10 +78,10 @@ class NanoTransformer(PreTrainedModel):
 
     HuggingFace compatible:
       - model.save_pretrained("path")
-      - NanoTransformer.from_pretrained("path")
+      - Skylar2ForCausalLM.from_pretrained("path")   (also opens checkpoints saved as NanoTransformer)
     """
 
-    config_class = NanoTransformerConfig
+    config_class = Skylar2Config
     supports_gradient_checkpointing = True
     _tied_weights_keys = (
         {"lm_head.weight": "token_emb.weight"}
@@ -99,10 +105,16 @@ class NanoTransformer(PreTrainedModel):
         # AttnRes ha 2L+1 punti di applicazione: due per blocco più questo, che
         # sceglie da quale profondità legge la testa di output.
         self.attn_res = bool(getattr(config, "attn_res", False))
+        self.attn_res_mode = getattr(config, "attn_res_mode", "block")
+        self.attn_res_block_size = getattr(config, "attn_res_block_size", 8)
         if self.attn_res:
-            w = getattr(config, "attn_res_block", None)
-            self.res_final = AttnResMixer(config.d_model, window=None if not w else 2 * w + 1)
-        self.ln_f = RMSNorm(config.d_model)
+            window = None
+            if self.attn_res_mode == "window":
+                w = getattr(config, "attn_res_block", None)
+                window = None if not w else 2 * w + 1
+            self.res_final = AttnResMixer(config.d_model, window=window,
+                                          rms_plus_eps=window is not None)
+        self.ln_f = make_norm(config)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
 
         # MTP: teste ausiliarie che predicono piu' avanti di un passo. Si SCARTANO a
@@ -222,6 +234,19 @@ class NanoTransformer(PreTrainedModel):
     def _has_recurrent_layers(self):
         return any(getattr(b, "layer_type", "attention") == "kda" for b in self.blocks)
 
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
+        """Opens checkpoints of both names. One saved before 30/09/2026 (model_type "nano-transformer")
+        goes through the legacy classes — same code — so transformers does not warn about a type mismatch."""
+        if cls is Skylar2ForCausalLM and "config" not in kwargs:
+            try:
+                saved, _ = PretrainedConfig.get_config_dict(pretrained_model_name_or_path)
+            except Exception:
+                saved = {}
+            if saved.get("model_type") == NanoTransformerConfig.model_type:
+                return NanoTransformer.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
+        return super().from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
+
     def _validate_kv_cache(self, kv_cache, batch_size, x_device):
         # La validazione conosce solo la tupla (k, v) rank-4 dell'attention. In un
         # modello ibrido la cache e' ETEROGENEA: i layer KDA portano
@@ -239,7 +264,7 @@ class NanoTransformer(PreTrainedModel):
         validate_kv_cache(kv_cache, self.blocks, batch_size, x_device)
 
     def forward(self, input_ids, labels=None, kv_cache=None, document_ids=None,
-                attention_mask=None, use_cache=False):
+                attention_mask=None, use_cache=False, return_hidden=False):
         """
         Args:
             input_ids:      (B, T) token indices
@@ -249,16 +274,18 @@ class NanoTransformer(PreTrainedModel):
                             Enables automatic document masking via FlexAttention.
             attention_mask: (B, 1, T, T) dense additive mask (backward compat).
             use_cache: Bool if use cache.
+            return_hidden:  also return 'hidden', the (B, T, d_model) state the head reads (after the
+                            final norm): what an embedder pools.
 
         Returns:
-            dict with 'logits', 'loss' (if labels), 'kv_cache'
+            dict with 'logits', 'loss' (if labels), 'kv_cache' (and 'hidden' if return_hidden)
         """
         B, T = input_ids.shape
         # F3: attention_mask, if passed by a caller, MUST be the 4D additive form (B,1,T,T).
         # A 2D HF-style padding mask (B,T) would silently disable causality and act as a bias.
         if attention_mask is not None and attention_mask.dim() != 4:
             raise ValueError(
-                f"NanoTransformer.forward expects a 4D additive attention_mask (B,1,T,T), got "
+                f"Skylar2ForCausalLM.forward expects a 4D additive attention_mask (B,1,T,T), got "
                 f"{attention_mask.dim()}D. Build it as (1-mask)[:,None,None,:]*min_val, or pass "
                 f"document_ids for packed training.")
         x = self.drop(self.token_emb(input_ids))
@@ -296,7 +323,8 @@ class NanoTransformer(PreTrainedModel):
         if document_ids is not None and kv_cache is None and self._has_recurrent_layers:
             cu_seqlens = build_cu_seqlens(document_ids)
 
-        residuals = [x] if self.attn_res else None
+        depth = (DepthState(x, self.attn_res_mode, self.attn_res_block_size)
+                 if self.attn_res else None)
 
         for i, block in enumerate(self.blocks):
             layer_cache = kv_cache[i] if kv_cache is not None else None
@@ -306,24 +334,25 @@ class NanoTransformer(PreTrainedModel):
                 # blocco si aspetta `use_cache`, senza nessun errore. Con la closure
                 # il legame è per nome e il problema non si ripresenta mai più.
                 #
-                # ⚠️ AttnRes: il blocco APPENDE le sue uscite a `residuals`. Nel backward
-                # il checkpoint riesegue il blocco: se riceve la lista vera, a quel punto
-                # contiene già le uscite di tutti i layer successivi e il ricalcolo legge
-                # sorgenti sbagliate. Il blocco lavora quindi su una COPIA congelata ora,
-                # e le due sorgenti nuove escono come output del checkpoint.
+                # ⚠️ AttnRes: il blocco FA AVANZARE lo stato di profondità. Nel backward il
+                # checkpoint riesegue il blocco: se riceve lo stato vero, a quel punto è già
+                # avanzato di tutti i layer successivi e il ricalcolo legge sorgenti
+                # sbagliate. Il blocco lavora quindi su una FOTOGRAFIA presa ora, e i
+                # tensori nuovi (sorgenti chiuse, somma parziale) escono come output.
                 def _run(inp, _b=block, _c=layer_cache,
-                         _r=tuple(residuals) if residuals is not None else None):
-                    r = list(_r) if _r is not None else None
+                         _f=depth.freeze() if depth is not None else None):
+                    st = None if _f is None else DepthState.thaw(
+                        _f, self.attn_res_mode, self.attn_res_block_size)
                     out, cache = _b(inp, kv_cache=_c, block_mask=block_mask,
                                     attention_mask=attention_mask, use_cache=False,
-                                    cu_seqlens=cu_seqlens, residuals=r)
-                    if r is None:
+                                    cu_seqlens=cu_seqlens, depth=st)
+                    if st is None:
                         return out, cache
-                    return out, cache, r[-2], r[-1]
+                    return (out, cache, *st.new_tensors(len(_f[0])))
                 res = torch.utils.checkpoint.checkpoint(_run, x, use_reentrant=False)
                 x, cache_i = res[0], res[1]
-                if residuals is not None:
-                    residuals.extend(res[2:])
+                if depth is not None:
+                    depth.adopt(list(res[2:]), pushes=2)
             else:
                 x, cache_i = block(
                     x,
@@ -332,17 +361,22 @@ class NanoTransformer(PreTrainedModel):
                     attention_mask=attention_mask,
                     use_cache=collect_cache,
                     cu_seqlens=cu_seqlens,
-                    residuals=residuals,
+                    depth=depth,
                 )
 
             if collect_cache:
                 new_cache.append(cache_i)
 
-        if self.attn_res:
-            x = self.res_final(residuals)
-
-        x_pre = x                 # serve alle teste MTP, che normalizzano per conto loro
-        x = self.ln_f(x)
+        if self.attn_res and self.mtp is None:
+            # La lettura finale sceglie da quale profondità legge la testa, con ln_f
+            # piegata nel kernel fuso (e, se gated, il suo gate applicato dopo).
+            x_pre = None
+            x = self.res_final.mix(depth.sources(), self.ln_f)
+        else:
+            if self.attn_res:
+                x = self.res_final.mix(depth.sources())
+            x_pre = x             # serve alle teste MTP, che normalizzano per conto loro
+            x = self.ln_f(x)
         logits = self.lm_head(x)
 
         # µP: scale output logits to keep magnitude stable across widths
@@ -367,7 +401,10 @@ class NanoTransformer(PreTrainedModel):
                     loss = loss + aux
                     loss_parts.update(detail)
 
-        return {"logits": logits, "loss": loss, "kv_cache": new_cache, "loss_parts": loss_parts}
+        out = {"logits": logits, "loss": loss, "kv_cache": new_cache, "loss_parts": loss_parts}
+        if return_hidden:
+            out["hidden"] = x
+        return out
 
     def count_params(self, non_embedding=False):
         """Count parameters (optionally excluding embedding)."""
@@ -579,3 +616,24 @@ class NanoTransformer(PreTrainedModel):
 
         if was_training:
             self.train()
+
+
+class NanoTransformer(Skylar2ForCausalLM):
+    """Name of the checkpoints saved before 30/09/2026 (config.json: model_type "nano-transformer",
+    architectures ["NanoTransformer"]): Skylar-236M and Skylar-980M-Cobol. Same code as Skylar2ForCausalLM."""
+    config_class = NanoTransformerConfig
+
+
+def _register_with_transformers():
+    """AutoConfig and AutoModelForCausalLM learn both names, so AutoModelForCausalLM.from_pretrained(path)
+    opens old and new checkpoints alike after `import models.decoder`."""
+    from transformers import AutoConfig, AutoModelForCausalLM
+    for cfg, model in ((Skylar2Config, Skylar2ForCausalLM), (NanoTransformerConfig, NanoTransformer)):
+        try:
+            AutoConfig.register(cfg.model_type, cfg)
+            AutoModelForCausalLM.register(cfg, model)
+        except ValueError:          # already registered: the module was imported twice, or by the pip package
+            pass
+
+
+_register_with_transformers()

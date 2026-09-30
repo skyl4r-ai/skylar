@@ -23,6 +23,8 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
+from training.optim import build_optimizer
+
 
 @dataclass
 class GRPOConfig:
@@ -34,6 +36,7 @@ class GRPOConfig:
     top_p: float = 0.95
     top_k: int = 0
     lr: float = 1e-6
+    optimizer: str = "adamw"           # "muon" for a base pretrained with Muon (training/optim.py)
     kl_coef: float = 0.02
     seed: int = 0
     bf16: bool = False
@@ -66,7 +69,7 @@ def grpo_train(model, tok, records, reward_fn, build_prompt, cfg=None, *, device
         ref = copy.deepcopy(model).to(dev).eval()
         for p in ref.parameters():
             p.requires_grad_(False)
-    opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, betas=(0.9, 0.95), weight_decay=0.0)
+    opt, _ = build_optimizer(model, cfg.lr, 0.0, cfg.optimizer)
     amp = (cfg.bf16 and dev == "cuda")
 
     for step in range(cfg.steps):

@@ -1,9 +1,9 @@
 import torch
 from tokenizers import Tokenizer, decoders
-from models.decoder import NanoTransformer
+from models.decoder import Skylar2ForCausalLM
 from utils.chatML import encode_chatml
 
-model = NanoTransformer.from_pretrained('checkpoints/skylar-100M-Chat-v4/best').to('cuda').eval()
+model = Skylar2ForCausalLM.from_pretrained('checkpoints/skylar-100M-Chat-v4/best').to('cuda').eval()
 tok = Tokenizer.from_file('checkpoints/skylar-100M-Chat-v4/best/tokenizer.json')
 if tok.decoder is None:
     tok.decoder = decoders.ByteLevel()

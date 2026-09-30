@@ -101,8 +101,8 @@ class SkylarSparseEncoder(PreTrainedModel):
     @classmethod
     def from_decoder(cls, decoder_path: str) -> "SkylarSparseEncoder":
         """Init from a pretrained decoder — copies token_emb, blocks, ln_f."""
-        from models.decoder import NanoTransformer
-        decoder = NanoTransformer.from_pretrained(decoder_path)
+        from models.decoder import Skylar2ForCausalLM
+        decoder = Skylar2ForCausalLM.from_pretrained(decoder_path)
         model = cls(decoder.config)
         model.token_emb.load_state_dict(decoder.token_emb.state_dict())
         model.blocks.load_state_dict(decoder.blocks.state_dict())

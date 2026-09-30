@@ -2,8 +2,9 @@
 Reusable memmap token dataset + background prefetcher — the streaming data layer.
 
 Memmaps sharded little-endian token files instead of loading the whole corpus into one
-RAM tensor: O(1) RAM regardless of corpus size, random-window next-token sampling,
-train/val split, long-context ready. This is the piece the framework was missing — the
+RAM tensor: O(1) RAM regardless of corpus size, next-token windows sampled either as a
+shuffled pass WITHOUT replacement (`get_batch_at`, the pretraining default) or at random
+(`get_batch`), train/val split, long-context ready. This is the piece the framework was missing — the
 `bin.*` trainers used to define their dataset inline; now pretrain/eval share this module.
 
 Shard format (written by the tokenizer step): little-endian **uint16** (`<u2`) or
@@ -16,8 +17,9 @@ the returned per-position document ids to a FlexAttention block mask.
 Usage:
     from data.memmap_dataset import MemmapTokenDataset, Prefetcher
     ds = MemmapTokenDataset("data/tokenized", seq_len=2048)
-    x, y = ds.get_batch("train", batch_size=16, device="cuda")          # (B,T) int64
-    pf = Prefetcher(ds, "train", 16, "cuda", seed=1234)                  # overlap load+compute
+    x, y = ds.get_batch("train", batch_size=16, device="cuda")          # (B,T) int64, random
+    x, y = ds.get_batch_at("train", 16, batch_index=0, device="cuda")   # shuffled pass, no repeats
+    pf = Prefetcher(ds, "train", 16, "cuda", seed=1234, indexed=True)    # overlap load+compute
     x, y = pf.next()
 """
 import json
@@ -36,6 +38,33 @@ _DTYPE_MAP = {"uint16": "<u2", "uint32": "<u4"}
 # with OSError 24 once a corpus grows past `ulimit -n` — the 4B mix has 31,905 shards against
 # a default limit of 1024. Re-opening on demand costs microseconds.
 _OPEN_SHARDS = 256
+
+_MASK64 = (1 << 64) - 1
+
+
+def _mix64(x):
+    """splitmix64 finaliser: a cheap, well-mixed 64-bit hash."""
+    x = (x + 0x9E3779B97F4A7C15) & _MASK64
+    x = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & _MASK64
+    x = ((x ^ (x >> 27)) * 0x94D049BB133111EB) & _MASK64
+    return x ^ (x >> 31)
+
+
+def _permute(i, n, key, rounds=4):
+    """Bijection of [0, n): a balanced Feistel network on the smallest even power of two >= n,
+    walking the cycle back into range. Deterministic in (key, i) and O(1) in memory, so the order of
+    the ~60M windows of a 500B-token corpus is never materialised."""
+    bits = max(2, (n - 1).bit_length())
+    bits += bits & 1
+    half = bits // 2
+    low = (1 << half) - 1
+    while True:
+        left, right = i >> half, i & low
+        for r in range(rounds):
+            left, right = right, left ^ (_mix64(key ^ (r << 56) ^ right) & low)
+        i = (left << half) | right
+        if i < n:
+            return i
 
 
 class _ShardCache:
@@ -123,13 +152,13 @@ class MemmapTokenDataset:
             self._w[k] = lens / lens.sum()
         self.rng = np.random.default_rng(seed)
         self.total_tokens = meta["total_tokens"]
+        self._win_cum = {}
 
     def get_batch(self, split, batch_size, device=None, rng=None,
                   return_doc_ids=False, bos_id=None):
         """Random (B, seq_len) next-token windows. Returns int64 (x, y) — or (x, y, doc_ids)
         when return_doc_ids=True and bos_id is given (doc_ids[b,t] = #<bos> seen up to t,
         i.e. a per-position document index for document-masked attention)."""
-        import torch
         r = rng if rng is not None else self.rng   # prefetch thread passes its OWN rng (thread-safety)
         shards = self.splits[split]
         w = self._w[split]
@@ -143,6 +172,45 @@ class MemmapTokenDataset:
             chunk = np.asarray(s[off: off + T + 1], dtype=np.int64)
             xb[i] = chunk[:-1]
             yb[i] = chunk[1:]
+        return self._to_batch(xb, yb, device, return_doc_ids, bos_id)
+
+    def _window_index(self, split):
+        """Cumulative count of non-overlapping windows of seq_len+1 tokens per shard (the last token
+        of a window is the first target of the next)."""
+        cum = self._win_cum.get(split)
+        if cum is None:
+            T = self.seq_len
+            cum = np.cumsum([(len(s) - 1) // T for s in self.splits[split]], dtype=np.int64)
+            self._win_cum[split] = cum
+        return cum
+
+    def get_batch_at(self, split, batch_size, batch_index, device=None, rank=0, world=1, seed=0,
+                     return_doc_ids=False, bos_id=None):
+        """Batch number `batch_index` of a shuffled pass WITHOUT replacement over the split's
+        non-overlapping windows. Sample k = (batch_index * world + rank) * batch_size + j is window
+        perm(k mod W) of pass k // W, with a new permutation at every pass. Deterministic in
+        (seed, batch_index, rank): a resumed run continues exactly where it stopped, and the ranks of
+        a data-parallel run never read the same window. With random windows (`get_batch`) a run of
+        0.6 corpora sees only 45% of the corpus and repeats the rest; here it sees 60%, once."""
+        cum = self._window_index(split)
+        n = int(cum[-1])
+        shards = self.splits[split]
+        T = self.seq_len
+        xb = np.empty((batch_size, T), dtype=np.int64)
+        yb = np.empty((batch_size, T), dtype=np.int64)
+        base = (batch_index * world + rank) * batch_size
+        for j in range(batch_size):
+            k = base + j
+            p = _permute(k % n, n, _mix64(_mix64(seed) ^ (k // n)))
+            si = int(np.searchsorted(cum, p, side="right"))
+            w = p - (int(cum[si - 1]) if si else 0)
+            chunk = np.asarray(shards[si][w * T: w * T + T + 1], dtype=np.int64)
+            xb[j] = chunk[:-1]
+            yb[j] = chunk[1:]
+        return self._to_batch(xb, yb, device, return_doc_ids, bos_id)
+
+    def _to_batch(self, xb, yb, device, return_doc_ids, bos_id):
+        import torch
         x = torch.from_numpy(xb)
         y = torch.from_numpy(yb)
         doc = None
@@ -156,8 +224,8 @@ class MemmapTokenDataset:
         return (x, y, doc) if return_doc_ids else (x, y)
 
     def n_windows(self, split):
-        """Approx number of non-overlapping seq_len windows in a split."""
-        return sum(len(s) // self.seq_len for s in self.splits[split])
+        """Number of non-overlapping windows in a split: one pass of `get_batch_at`."""
+        return int(self._window_index(split)[-1])
 
 
 class Prefetcher:
@@ -167,11 +235,16 @@ class Prefetcher:
 
     Extra get_batch kwargs (e.g. return_doc_ids=True, bos_id=...) pass through via **batch_kwargs.
     The thread keeps its OWN rng (independent of the main-thread val sampler) and that rng state is
-    save/restorable (rng_state/set_rng_state) so a resumed run does not re-see the same windows."""
-    def __init__(self, ds, split, batch_size, device, depth=4, seed=0, **batch_kwargs):
+    save/restorable (rng_state/set_rng_state) so a resumed run does not re-see the same windows.
+
+    indexed=True serves `ds.get_batch_at` batches start, start+1, ... instead: the position is the
+    number of micro-batches already trained, so a resume needs no saved sampler state."""
+    def __init__(self, ds, split, batch_size, device, depth=4, seed=0, indexed=False, start=0,
+                 rank=0, world=1, **batch_kwargs):
         import threading, queue
         self.ds, self.split, self.bs, self.device = ds, split, batch_size, device
         self.batch_kwargs = batch_kwargs
+        self.indexed, self._next, self.rank, self.world, self.seed = indexed, start, rank, world, seed
         self._rng = np.random.default_rng(seed)    # independent rng → no race with main-thread val batches
         self._q = queue.Queue(maxsize=depth)
         self._stop = False
@@ -181,8 +254,15 @@ class Prefetcher:
     def _worker(self):
         while not self._stop:
             try:
-                self._q.put(self.ds.get_batch(self.split, self.bs, self.device,
-                                              rng=self._rng, **self.batch_kwargs))
+                if self.indexed:
+                    batch = self.ds.get_batch_at(self.split, self.bs, self._next, self.device,
+                                                 rank=self.rank, world=self.world, seed=self.seed,
+                                                 **self.batch_kwargs)
+                    self._next += 1
+                else:
+                    batch = self.ds.get_batch(self.split, self.bs, self.device,
+                                              rng=self._rng, **self.batch_kwargs)
+                self._q.put(batch)
             except Exception as e:                 # surface loader errors on the main thread
                 self._q.put(e); return
 

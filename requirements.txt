@@ -20,7 +20,7 @@ structlog>=24.1.0
 tenacity>=8.2.0
 rich>=13.0.0
 
-# Kernel Triton per i layer KDA ricorrenti dell'ibrido (docs/ARCH_V2.md).
+# Kernel Triton per i layer KDA ricorrenti dell'ibrido (docs/PAPER_V2.md §3.2, §4.4).
 # MIT, nessun peso: e' una libreria di kernel come flash-attn o cuBLAS, quindi non
 # tocca la regola "100% from-scratch". Serve SOLO se kda_ratio e' attivo.
 # VERSIONE FISSATA di proposito: e' una libreria di ricerca che si muove in fretta e

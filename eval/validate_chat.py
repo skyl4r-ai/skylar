@@ -19,7 +19,7 @@ from pathlib import Path
 from tokenizers import Tokenizer, decoders
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from models.decoder import NanoTransformer
+from models.decoder import Skylar2ForCausalLM
 from utils.chatML import encode_chatml
 
 DEFAULT_SYSTEM = "Sei Skylar, un assistente italiano esperto di normativa bancaria, legale ed europea. Rispondi in modo chiaro e conciso."
@@ -67,7 +67,7 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Loading {args.model} on {device} ...")
-    model = NanoTransformer.from_pretrained(args.model).to(device).eval()
+    model = Skylar2ForCausalLM.from_pretrained(args.model).to(device).eval()
     tok = Tokenizer.from_file(f"{args.model}/tokenizer.json")
     if tok.decoder is None:
         tok.decoder = decoders.ByteLevel()

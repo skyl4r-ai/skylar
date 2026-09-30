@@ -3,19 +3,19 @@
 @copyright: A. Ivanovitch | CEO MwSpace | 2026
 =================================================================
 
-Budget di parametri e learning rate per l'architettura Skylar v2.
+Budget di parametri e learning rate per l'architettura Skylar 2 (docs/PAPER_V2.md).
 
 Risponde a due domande che NON vanno stimate a occhio prima di spendere
 GPU-settimane (regola delle fonti, CLAUDE.md):
 
-  1. quanto costa in parametri ogni componente v2 (AttnRes, ibrido KDA,
-     output gate, SiTU-GLU, MTP) su ciascun preset;
+  1. quanto costa in parametri ogni componente v2 (ibrido KDA, AttnRes a
+     blocchi, GatedNorm, output gate, SiTU-GLU, MTP) su ciascun preset;
   2. quale peak LR esce dalla scaling-law 2601.05049 ancorata al nostro
      punto noto (980M @ 3e-4 su 20.37B token), dato N e D reali.
 
 Il conto dei parametri è ARITMETICO, non misurato istanziando il modello:
 serve a decidere PRIMA di scrivere il codice. Dopo, `--check` confronta il
-baseline calcolato con quello reale di `get_config` + `NanoTransformer`.
+baseline calcolato con quello reale di `get_config` + `Skylar2ForCausalLM`.
 
     python utils/bin.arch_budget.py                       # tabella completa
     python utils/bin.arch_budget.py --tokens 300e9        # LR a 300B token
@@ -95,13 +95,16 @@ def lr_from_scaling_law(n_params, tokens):
     return ANCHOR_LR * (n_params / ANCHOR_N) ** EXP_N * (tokens / ANCHOR_D) ** EXP_D
 
 
-def components(name, p, ratio_kda=(27, 9), attnres_points=None, gate="lowrank", with_mtp=False):
+def components(name, p, ratio_kda=(27, 9), attnres_points=None, gate="lowrank", with_mtp=False,
+               gated_norm=16):
     """Delta di parametri di ogni componente v2, in assoluto e in % sul baseline."""
     base = baseline(p)
     d, L = p["d_model"], p["n_layers"]
     n_kda, n_attn = ratio_kda
     assert n_kda + n_attn == L, f"{n_kda}+{n_attn} != {L} layer"
-    pts = attnres_points if attnres_points else 2 * L + 1
+    # Punti di lettura: due per layer + quello prima della testa, meno il primo, che ha
+    # una sola sorgente (l'embedding) e nessun parametro.
+    pts = attnres_points if attnres_points else 2 * L
 
     hk = h_kda_parity(p)
     assert hk == int(hk), f"H_kda non intero per {name}: {hk}"
@@ -115,12 +118,15 @@ def components(name, p, ratio_kda=(27, 9), attnres_points=None, gate="lowrank", 
         ("Ibrido KDA %d:%d, H_kda=%d" % (n_kda // math.gcd(n_kda, n_attn),
                                          n_attn // math.gcd(n_kda, n_attn), hk),
          n_kda * (kda - base["attn"])),
+        # GatedNorm (2601.22966): gate a basso rango dopo ogni pre-norm e la norm finale,
+        # Linear(d, r) + Linear(r, d) senza bias, (2L+1) norm.
+        ("GatedNorm (rango %d)" % gated_norm, (2 * L + 1) * 2 * d * gated_norm),
         # Gate per-testa: Linear(d, H) + o_norm. La variante per-canale costa 127x
-        # di piu' e su 5 seed e' indistinguibile (PAPER_V2 §8.4).
+        # di piu' e su 5 seed e' indistinguibile (docs/PAPER_V2.md §3.5).
         ("Output gate per-testa (%d layer)" % n_attn,
          n_attn * (d * p["n_heads"] + p["d_head"])),
         ("SiTU-GLU (al posto di SwiGLU)", 0),
-        # MTP TAGLIATO dopo misura (docs/ARCH_V2.md §11): zero beneficio sulla CE,
+        # MTP TAGLIATO dopo misura (docs/PAPER_V2.md §3.7): zero beneficio sulla CE,
         # -11% di velocita'. Il conto resta calcolabile con --with_mtp per riaprire
         # la decisione se un giorno cambiassero le condizioni.
     ] + ([("MTP (1 layer + proiezione)", mtp)] if with_mtp else [])
@@ -134,7 +140,8 @@ def main():
     ap.add_argument("--preset", default=None, help="limita a un preset")
     ap.add_argument("--gate", default="lowrank", choices=["lowrank", "fullrank"])
     ap.add_argument("--with_mtp", action="store_true",
-                    help="includi MTP nel conto (tagliato dopo misura, vedi ARCH_V2 §11)")
+                    help="includi MTP nel conto (tagliato dopo misura, docs/PAPER_V2.md §3.7)")
+    ap.add_argument("--gated_norm", type=int, default=16, help="rango di GatedNorm (0 = senza)")
     ap.add_argument("--check", action="store_true",
                     help="confronta il baseline calcolato col modello reale (serve torch)")
     args = ap.parse_args()
@@ -144,7 +151,8 @@ def main():
 
     for name in names:
         p = PRESETS[name]
-        base, comps, kinfo = components(name, p, gate=args.gate, with_mtp=args.with_mtp)
+        base, comps, kinfo = components(name, p, gate=args.gate, with_mtp=args.with_mtp,
+                                        gated_norm=args.gated_norm)
         b = base["total"]
 
         print("\n" + "=" * 78)
@@ -174,8 +182,8 @@ def main():
             from models.config import get_config
             cfg = get_config(name if name in ("1B_D", "4b") else "1B_D", vocab_size=VOCAB)
             if name in ("1B_D", "4b"):
-                from models.decoder import NanoTransformer
-                real = sum(x.numel() for x in NanoTransformer(cfg).parameters())
+                from models.decoder import Skylar2ForCausalLM
+                real = sum(x.numel() for x in Skylar2ForCausalLM(cfg).parameters())
                 delta = real - b
                 flag = "OK" if abs(delta) < 0.001 * b else "DISCREPANZA"
                 print(f"  [check] modello reale {real/1e6:.2f}M vs calcolato {b/1e6:.2f}M "
@@ -188,7 +196,8 @@ def main():
     for name, b, v2, lr in summary:
         print(f"  {name:<8} {b/1e6:>11.2f}M {v2/1e6:>11.2f}M {100*(v2-b)/b:>+7.2f}%   {lr:>10.2e}")
     print(f"\n  D = {args.tokens/1e9:.0f}B token per TUTTI i modelli (dataset intero).")
-    print("  ⚠ i LR valgono per AdamW: con Muon la scala cambia e la formula non è trasferibile.")
+    print("  ⚠ i LR sono di AdamW. Muon (update in scala AdamW) usa 2x questo valore: "
+          "docs/PAPER_V2.md §7.")
 
 
 if __name__ == "__main__":

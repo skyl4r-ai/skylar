@@ -26,7 +26,7 @@ import torch
 from pathlib import Path
 from tokenizers import Tokenizer, decoders
 
-from models.decoder import NanoTransformer
+from models.decoder import Skylar2ForCausalLM
 
 
 # ─────────────────────────────────────────────────────────────
@@ -149,7 +149,7 @@ def check_italian_coherence(text: str) -> dict[str, bool]:
 
 @torch.no_grad()
 def generate_completion(
-    model: NanoTransformer,
+    model: Skylar2ForCausalLM,
     tokenizer: Tokenizer,
     prompt: str,
     device: str,
@@ -212,7 +212,7 @@ PERPLEXITY_TEXTS: list[str] = [
 
 @torch.no_grad()
 def compute_perplexity(
-    model: NanoTransformer,
+    model: Skylar2ForCausalLM,
     tokenizer: Tokenizer,
     texts: list[str],
     device: str,
@@ -256,7 +256,7 @@ def compute_perplexity(
 def run_eval(args: argparse.Namespace) -> None:
     # ── Load ──
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = NanoTransformer.from_pretrained(args.model).to(device)
+    model = Skylar2ForCausalLM.from_pretrained(args.model).to(device)
     model.eval()
 
     tokenizer = Tokenizer.from_file(f"{args.model}/tokenizer.json")

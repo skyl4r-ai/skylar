@@ -85,7 +85,8 @@ import sys as _sys
 from pathlib import Path as _Path
 _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 
-from models.decoder import NanoTransformer
+from models.decoder import Skylar2ForCausalLM
+from training.optim import OptimizerSet, build_optimizer
 
 try:
     from accelerate import Accelerator
@@ -413,7 +414,7 @@ def _make_train_progress(console_obj: Console) -> Progress:
 
 def train_sft(args):
     console.print()
-    console.rule("[bold cyan]NanoTransformer SFT[/bold cyan]", style="cyan")
+    console.rule("[bold cyan]Skylar2ForCausalLM SFT[/bold cyan]", style="cyan")
     console.print()
 
     # ── Seed ──
@@ -510,11 +511,11 @@ def train_sft(args):
     console.rule("[bold]Model[/bold]", style="dim")
     if args.resume and os.path.exists(args.resume):
         console.print(f"  [cyan]↻[/cyan] Resuming from checkpoint: [bold]{args.resume}[/bold]")
-        model = NanoTransformer.from_pretrained(args.resume)
+        model = Skylar2ForCausalLM.from_pretrained(args.resume)
         config = model.config
     elif args.base_model and os.path.exists(args.base_model):
         console.print(f"  [green]✓[/green] Loading pre-trained base model: [bold]{args.base_model}[/bold]")
-        model = NanoTransformer.from_pretrained(args.base_model)
+        model = Skylar2ForCausalLM.from_pretrained(args.base_model)
         config = model.config
     else:
         console.print("  [bold red]✗[/bold red] Provide --base_model (pre-trained) or --resume (SFT checkpoint)")
@@ -646,24 +647,21 @@ def train_sft(args):
                 opt_table.add_row(g["name"], f"{n_p:,}", f"{g['lr']:.2e}", f"{g['weight_decay']}")
             console.print(opt_table)
     else:
-        # exclude norm/bias (1D) AND embeddings/lm_head from weight decay (consistent with mup_param_groups)
-        decay_params, nodecay_params = [], []
-        for n, p in model.named_parameters():
-            (nodecay_params if (p.dim() < 2 or "emb" in n.lower() or "lm_head" in n.lower())
-             else decay_params).append(p)
-        optimizer = torch.optim.AdamW([
-            {"params": decay_params, "weight_decay": args.weight_decay},
-            {"params": nodecay_params, "weight_decay": 0.0},
-        ], lr=args.lr, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
-
-        n_decay = sum(p.numel() for p in decay_params)
-        n_nodecay = sum(p.numel() for p in nodecay_params)
+        # exclude norm/bias (1D) AND embeddings/lm_head from weight decay (consistent with mup_param_groups).
+        # --optimizer muon: Muon on the hidden linear maps, for a base pretrained with Muon (training/optim.py).
+        optimizer, opt_info = build_optimizer(
+            model, args.lr, args.weight_decay, args.optimizer, eps=1e-8, fused=use_fused,
+            decay=lambda n, p: p.dim() >= 2 and "emb" not in n.lower() and "lm_head" not in n.lower())
         if is_main:
-            console.print(f"  [dim]Decay params: {n_decay:,} | No-decay params: {n_nodecay:,}[/dim]")
+            console.print(f"  [dim]{args.optimizer}: {opt_info}[/dim]")
 
     # ── Accelerate: prepare model, optimizer, dataloader ──
     if use_accelerate:
-        model, optimizer, train_loader = accelerator.prepare(model, optimizer, train_loader)
+        if isinstance(optimizer, OptimizerSet):        # Muon + AdamW: accelerate prepares each one
+            model, train_loader, *prepared = accelerator.prepare(model, train_loader, *optimizer.opts)
+            optimizer = OptimizerSet(prepared)
+        else:
+            model, optimizer, train_loader = accelerator.prepare(model, optimizer, train_loader)
         val_loader = accelerator.prepare(val_loader)
 
     # ── Wandb ──
@@ -674,6 +672,8 @@ def train_sft(args):
     # ── Train ──
     os.makedirs(args.out_dir, exist_ok=True)
     scaler = torch.amp.GradScaler(enabled=(dtype == torch.float16 and not use_accelerate))
+    if scaler.is_enabled() and isinstance(optimizer, OptimizerSet):
+        raise SystemExit("--optimizer muon needs bf16 (or accelerate): the fp16 GradScaler drives one optimizer")
 
     model.train()
     step = 0  # optimizer step (quello "vero")
@@ -1014,6 +1014,9 @@ def main():
     parser.add_argument("--sample_prompt", type=str, default="Cosa è la normativa bancaria italiana?",
                         help="user prompt used for the periodic in-training sample generation")
     parser.add_argument("--weight_decay", type=float, default=0.1)
+    parser.add_argument("--optimizer", default="adamw", choices=["adamw", "muon"],
+                        help="muon for a base pretrained with Muon (Skylar 2): Muon in pretraining + Muon in "
+                             "SFT is the best pairing (Moonlight 2502.16982, Table 6)")
     parser.add_argument("--grad_clip", type=float, default=1.0)
 
     # LR Schedule

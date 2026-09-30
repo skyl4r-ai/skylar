@@ -104,7 +104,7 @@ if torch.cuda.is_available() and "B200" in torch.cuda.get_device_name(0):
 from torch.utils.data import Dataset, DataLoader
 from tokenizers import Tokenizer, decoders
 
-from models.decoder import NanoTransformer
+from models.decoder import Skylar2ForCausalLM
 from utils.chatML import create_loss_mask, load_dataset_jsonl
 
 
@@ -400,7 +400,7 @@ def _make_progress() -> Progress:
 
 def load_frozen_teacher(path, device, teacher_dtype):
     """Load the teacher, freeze it, move to device. Returns (model, vocab_size)."""
-    teacher = NanoTransformer.from_pretrained(path)
+    teacher = Skylar2ForCausalLM.from_pretrained(path)
     teacher.eval()
     teacher.requires_grad_(False)
     dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
@@ -413,7 +413,7 @@ def load_frozen_teacher(path, device, teacher_dtype):
 
 def train_distill(args):
     console.print()
-    console.rule("[bold cyan]NanoTransformer Distillation[/bold cyan]", style="cyan")
+    console.rule("[bold cyan]Skylar2ForCausalLM Distillation[/bold cyan]", style="cyan")
     console.print()
 
     # ── Seed ──
@@ -482,10 +482,10 @@ def train_distill(args):
     console.rule("[bold]Student[/bold]", style="dim")
     if args.resume and os.path.exists(args.resume):
         console.print(f"  [cyan]↻[/cyan] Resuming student from: [bold]{args.resume}[/bold]")
-        student = NanoTransformer.from_pretrained(args.resume)
+        student = Skylar2ForCausalLM.from_pretrained(args.resume)
     elif args.base_model and os.path.exists(args.base_model):
         console.print(f"  [green]✓[/green] Student init from base model: [bold]{args.base_model}[/bold]")
-        student = NanoTransformer.from_pretrained(args.base_model)
+        student = Skylar2ForCausalLM.from_pretrained(args.base_model)
     else:
         console.print("  [bold red]✗[/bold red] Provide --base_model (student init) or --resume")
         sys.exit(1)

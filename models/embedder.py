@@ -12,7 +12,7 @@ decoder's backbone.
 
 Bidirectional Transformer embedding model.
 
-Same architecture as NanoTransformer decoder (same blocks, same layers),
+Same architecture as the Skylar2ForCausalLM decoder (same blocks, same layers),
 but:
   - No causal mask → attention sees the full sequence (bidirectional)
   - No KV cache → not autoregressive
@@ -210,10 +210,10 @@ class SkylarEmbedder(PreTrainedModel):
             decoder_path: path to decoder checkpoint dir
             pool_strategy: "mean", "cls", or "last"
         """
-        from models.decoder import NanoTransformer
+        from models.decoder import Skylar2ForCausalLM
 
         logger.info("Loading decoder from %s", decoder_path)
-        decoder = NanoTransformer.from_pretrained(decoder_path)
+        decoder = Skylar2ForCausalLM.from_pretrained(decoder_path)
         config = decoder.config
         config.pool_strategy = pool_strategy
 

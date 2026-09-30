@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # filepath: corpus_diagnostic.py
 """
-Corpus diagnostic tool for NanoTransformer pretraining data.
+Corpus diagnostic tool for Skylar2ForCausalLM pretraining data.
 
 Analyzes:
 - Document count and distribution by source

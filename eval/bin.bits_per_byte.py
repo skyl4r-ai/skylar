@@ -149,8 +149,8 @@ def main():
     if not args.model:
         ap.error("serve --model (o --build)")
 
-    from models.decoder import NanoTransformer
-    model = NanoTransformer.from_pretrained(args.model).to(args.device).eval()
+    from models.decoder import Skylar2ForCausalLM
+    model = Skylar2ForCausalLM.from_pretrained(args.model).to(args.device).eval()
     tok_path = args.tokenizer or os.path.join(args.model, "tokenizer.json")
     tok = Tokenizer.from_file(tok_path)
 

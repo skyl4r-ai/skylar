@@ -204,7 +204,7 @@ class CausalSelfAttention(nn.Module):
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
 
-        # ── v2: NoPE (docs/ARCH_V2.md §1, punto 6) ──
+        # ── v2: NoPE (docs/PAPER_V2.md §3.7) ──
         # In un ibrido con KDA la posizione arriva dalla ricorrenza dei layer
         # ricorrenti, quindi i layer full-attention possono farne a meno: è ciò che
         # dà a K3 l'extrapolazione oltre la finestra addestrata senza YaRN.
@@ -215,7 +215,7 @@ class CausalSelfAttention(nn.Module):
         self.rope = (RotaryEmbedding(self.d_head, config.max_seq_len, base=config.rope_theta)
                      if self.use_rope else None)
 
-        # ── v2: output gate full-rank (docs/ARCH_V2.md §1, punto 4) ──
+        # ── v2: output gate (docs/PAPER_V2.md §3.5) ──
         #   y = W_o[ σ(W_gate·x) ⊙ RMSNorm(attn_out) ]
         # Il gate si calcola dall'INPUT del layer, non dall'uscita dell'attention:
         # così la sua decisione non dipende da quanto l'attention ha già prodotto, ed
@@ -223,7 +223,7 @@ class CausalSelfAttention(nn.Module):
         # probabilità sul primo token per non attendere a nulla).
         # NOME: deliberatamente NON `*.W_o.weight` né `*.w2.weight`, i due pattern su
         # cui decoder.py fa l'init depth-scaled — un gate scalato in profondità non
-        # avrebbe senso. Vedi la trappola #1 in docs/ARCH_V2.md §6.
+        # avrebbe senso.
         # Due forme, e la differenza di costo e' 128x:
         #   "fullrank" → un valore per CANALE d'uscita: Linear(d, H·d_head)
         #   "perhead"  → un valore per TESTA:          Linear(d, H)

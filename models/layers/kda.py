@@ -3,7 +3,7 @@
 @copyright: A. Ivanovitch | CEO MwSpace | 2026
 =================================================================
 
-KDA — Kimi Delta Attention: il layer ricorrente dell'ibrido (docs/ARCH_V2.md §1-2).
+KDA — Kimi Delta Attention: il layer ricorrente dell'ibrido (docs/PAPER_V2.md §3.2, §4.4).
 
 Al posto di confrontare ogni token con tutti i precedenti (costo che cresce col
 quadrato del contesto e con una KV-cache che cresce lineare), KDA porta avanti uno
@@ -13,16 +13,18 @@ quadrato del contesto e con una KV-cache che cresce lineare), KDA porta avanti u
 
 `Diag(α_t)` è un gate di dimenticanza **per canale** — ogni dimensione dello stato
 decide da sola quanto ricordare — e il termine `(I − β k kᵀ)` cancella dallo stato
-ciò che la chiave corrente sta per sovrascrivere. Il risultato per noi: a 32k token
-il decode è **11× più veloce** e lo stato è **819× più piccolo** della KV-cache
-(misurato sulla 4090). Su COBOL, dove un programma più i suoi copybook sono lunghi,
+ciò che la chiave corrente sta per sovrascrivere. Il risultato per noi: sul 990M ibrido
+una sequenza tiene 18 KiB per token invece di 72, più 14 MiB fissi (3,9× meno a 32k
+token), e con più prompt lunghi la generazione fa 1,9× i token al secondo
+(docs/PAPER_V2.md §6.9). Su COBOL, dove un programma più i suoi copybook sono lunghi,
 è la differenza fra contesto lungo nominale e contesto lungo usabile.
 
 ## Cosa è nostro e cosa no
 
 Nostre: le proiezioni, i nomi, il dimensionamento, la cache, l'init. Del kernel
 `flash-linear-attention` (MIT) è solo la **ricorrenza chunkwise in Triton** — lo
-stesso rapporto che abbiamo con flash-attn o con cuBLAS. Non ci sono pesi di altri:
+stesso rapporto che abbiamo con flash-attn o con cuBLAS. Su CPU e MPS, dove Triton non
+gira, la stessa ricorrenza è fatta token per token in PyTorch (`kda_torch`), senza fla. Non ci sono pesi di altri:
 la regola "100% from-scratch" resta intatta.
 
 ## Il dimensionamento — perché H_kda non è il numero di teste di Kimi
@@ -62,6 +64,50 @@ def _load_kernels():
         return chunk_kda, fused_recurrent_kda
     except ImportError as e:
         raise ImportError(f"{_FLA_HINT}\n(causa: {e})") from e
+
+
+def kda_torch(q, k, v, g, beta, A_log, dt_bias, lower_bound, initial_state=None,
+              output_final_state=False, cu_seqlens=None):
+    """KDA in plain PyTorch, token by token: the path for CPU and MPS, where the Triton kernels of
+    flash-linear-attention do not run. Same computation as `fla.ops.kda` with the flags SkylarKDA uses
+    (use_qk_l2norm_in_kernel, use_gate_in_kernel, use_beta_sigmoid_in_kernel, safe_gate with lower_bound,
+    state_v_first), checked against the kernels by gate G12 (relative error ~1e-3, the kernels' own
+    internal precision):
+        q, k  <- q / ||q||, k / ||k||   (eps 1e-6), q scaled by K^-1/2
+        a     =  lower_bound * sigmoid(exp(A_log) * (g + dt_bias))     per-channel log-decay in (lower_bound, 0)
+        S     <- S * exp(a)                                             decay along K; S is [V, K] ("v first")
+        S     <- S + sigmoid(beta) * (v - S k) k^T                      delta rule
+        o     =  S q
+    q, k, g: (B, T, H, K); v: (B, T, H, V); beta: (B, T, H); initial_state: (B, H, V, K) or None;
+    cu_seqlens (varlen, B = 1): the state restarts at every segment. Returns (o in v's dtype, final
+    state float32 — one per segment with cu_seqlens — or None)."""
+    if cu_seqlens is not None:
+        outs, states = [], []
+        bounds = cu_seqlens.tolist()
+        for s, e in zip(bounds[:-1], bounds[1:]):
+            o, st = kda_torch(q[:, s:e], k[:, s:e], v[:, s:e], g[:, s:e], beta[:, s:e], A_log, dt_bias,
+                              lower_bound, None, output_final_state)
+            outs.append(o)
+            states.append(st)
+        return torch.cat(outs, 1), (torch.cat(states, 0) if output_final_state else None)
+    B, T, H, K = q.shape
+    dtype = v.dtype
+    q, k, v, g, beta = (t.float() for t in (q, k, v, g, beta))
+    q = q / torch.sqrt((q * q).sum(-1, keepdim=True) + 1e-6) * K ** -0.5
+    k = k / torch.sqrt((k * k).sum(-1, keepdim=True) + 1e-6)
+    a = lower_bound * torch.sigmoid(A_log.float().exp().view(1, 1, H, 1)
+                                    * (g + dt_bias.float().view(1, 1, H, K)))
+    beta = torch.sigmoid(beta)
+    S = (initial_state.float().clone() if initial_state is not None
+         else q.new_zeros(B, H, v.shape[-1], K))
+    o = torch.empty(B, T, H, v.shape[-1], dtype=torch.float32, device=q.device)
+    for t in range(T):
+        S = S * a[:, t].exp().unsqueeze(-2)
+        kt = k[:, t]
+        u = (v[:, t] - torch.einsum("bhvk,bhk->bhv", S, kt)) * beta[:, t].unsqueeze(-1)
+        S = S + u.unsqueeze(-1) * kt.unsqueeze(-2)
+        o[:, t] = torch.einsum("bhvk,bhk->bhv", S, q[:, t])
+    return o.to(dtype), (S if output_final_state else None)
 
 
 class ShortConv(nn.Module):
@@ -161,7 +207,7 @@ class SkylarKDA(nn.Module):
         # nell'attention, e non `o_proj`. Non è estetica — `decoder.py:110-112`
         # applica l'init depth-scaled 0.02/√(2L) cercando i nomi `W_o.weight` e
         # `w2.weight`. Un modulo chiamato `o_proj` salterebbe l'init IN SILENZIO,
-        # senza errori, dando solo un modello peggiore (trappola #1, ARCH_V2 §6).
+        # senza errori, dando solo un modello peggiore.
         self.W_q = nn.Linear(d, self.key_dim, bias=False)
         self.W_k = nn.Linear(d, self.key_dim, bias=False)
         self.W_v = nn.Linear(d, self.key_dim, bias=False)
@@ -215,9 +261,11 @@ class SkylarKDA(nn.Module):
         """Byte dello stato ricorrente per sequenza — il numero da confrontare con la KV-cache."""
         return batch_size * self.n_heads * self.head_dim * self.head_dim * 4
 
+    # Triton kernels on CUDA; `kda_torch` elsewhere, or here when switched off (the parity gate G12).
+    use_kernels = True
+
     def forward(self, x, kv_cache=None, block_mask=None, attention_mask=None,
                 use_cache=False, cu_seqlens=None):
-        chunk_kda, fused_recurrent_kda = _load_kernels()
         B, T, _ = x.shape
 
         rec_state, conv_states = (kv_cache if kv_cache is not None else (None, None))
@@ -277,20 +325,27 @@ class SkylarKDA(nn.Module):
         #
         # Il kernel chunkwise è per il training e il prefill; in decode (T=1) la
         # forma ricorrente fusa è più veloce, perché non c'è nessun chunk da riempire.
-        kernel = fused_recurrent_kda if T == 1 else chunk_kda
-        o, rec_state = kernel(
-            q=q, k=k, v=v, g=g, beta=beta,
-            A_log=self.A_log, dt_bias=self.dt_bias,
-            initial_state=rec_state,
-            output_final_state=bool(use_cache or kv_cache is not None),
-            use_qk_l2norm_in_kernel=True,
-            use_gate_in_kernel=True,
-            use_beta_sigmoid_in_kernel=True,
-            safe_gate=True,
-            lower_bound=self.lower_bound,
-            state_v_first=True,
-            cu_seqlens=cu_seqlens,
-        )
+        if x.is_cuda and self.use_kernels:
+            chunk_kda, fused_recurrent_kda = _load_kernels()
+            kernel = fused_recurrent_kda if T == 1 else chunk_kda
+            o, rec_state = kernel(
+                q=q, k=k, v=v, g=g, beta=beta,
+                A_log=self.A_log, dt_bias=self.dt_bias,
+                initial_state=rec_state,
+                output_final_state=bool(use_cache or kv_cache is not None),
+                use_qk_l2norm_in_kernel=True,
+                use_gate_in_kernel=True,
+                use_beta_sigmoid_in_kernel=True,
+                safe_gate=True,
+                lower_bound=self.lower_bound,
+                state_v_first=True,
+                cu_seqlens=cu_seqlens,
+            )
+        else:
+            o, rec_state = kda_torch(q, k, v, g, beta, self.A_log, self.dt_bias, self.lower_bound,
+                                     initial_state=rec_state,
+                                     output_final_state=bool(use_cache or kv_cache is not None),
+                                     cu_seqlens=cu_seqlens)
 
         gate = self.g_full(x) if self.gate_fullrank else self.g_b(self.g_a(x))  # gate su x (B,T,D)
         o = self.o_norm(o.reshape(B, T, H, Dh)) * torch.sigmoid(gate.view(B, T, H, Dh))
