@@ -728,9 +728,13 @@ def train_sft(args):
 
     # Helper to get the unwrapped model (for save_pretrained / generate)
     def unwrap_model():
-        if use_accelerate:
-            return accelerator.unwrap_model(model)
-        return model
+        # The plain model under DDP and compile. Not accelerator.unwrap_model: with the compiled
+        # model inside DDP accelerate 1.12 fails with KeyError '_orig_mod' (seen in the pretrain
+        # trainer on the cluster smoke of 30/09/2026).
+        m = model
+        while isinstance(m, torch.nn.parallel.DistributedDataParallel) or hasattr(m, "_orig_mod"):
+            m = m.module if hasattr(m, "module") else m._orig_mod
+        return m
 
     def save_checkpoint(name: str, is_best: bool = False):
         """Save checkpoint locally + async upload to S3."""

@@ -320,6 +320,9 @@ def main():
     ap.add_argument("--no_checkpoints", action="store_true",
                     help="esperimenti: niente best/last/milestone e niente stato dell'ottimizzatore; "
                          "a fine run salva solo i pesi in <out>/final (un decimo dello spazio)")
+    ap.add_argument("--ckpt_per_node", action="store_true",
+                    help="multi-node without a shared filesystem: every node's first process writes its own "
+                         "<out>/last, so each node can resume. Never with an --out shared between nodes")
     ap.add_argument("--grad_ckpt", action="store_true")
     ap.add_argument("--no_prefetch", action="store_true")
     ap.add_argument("--sampler", default="permutation", choices=["permutation", "random"],
@@ -346,6 +349,9 @@ def main():
     accelerator = Accelerator(gradient_accumulation_steps=args.grad_accum)
     device = accelerator.device
     is_main = accelerator.is_main_process
+    # Who writes the resume point <out>/last: the main process, or with --ckpt_per_node the first
+    # process of every node (on a cluster each node has its own local disk).
+    saves_last = accelerator.is_local_main_process if args.ckpt_per_node else is_main
     world = accelerator.num_processes
     rank = accelerator.process_index
     amp_dtype = torch.bfloat16
@@ -454,8 +460,12 @@ def main():
         opt = OptimizerSet(prepared)
     else:
         model, opt = accelerator.prepare(model, opt)
-    raw_model = accelerator.unwrap_model(model)
-    raw_model = getattr(raw_model, "_orig_mod", raw_model)   # strip compile wrapper for save/val
+    # The plain model for save/val, under DDP and compile. Not accelerator.unwrap_model: with the
+    # compiled model inside DDP (the order above) accelerate 1.12 looks for _orig_mod in __dict__
+    # and fails with KeyError on every multi-GPU run with --compile (cluster smoke, 30/09/2026).
+    raw_model = model
+    while isinstance(raw_model, torch.nn.parallel.DistributedDataParallel) or hasattr(raw_model, "_orig_mod"):
+        raw_model = raw_model.module if hasattr(raw_model, "module") else raw_model._orig_mod
 
     if resume_state is not None:
         opt.load_state_dict(resume_state["opt"])
@@ -470,8 +480,16 @@ def main():
                 ds.rng.bit_generator.state = resume_state["sampler_rng"]
             except Exception:
                 pass
-        if is_main:
-            print(f"[resume] from {resume_dir} @ step {start_step} tokens {tokens_seen/1e9:.2f}B", flush=True)
+        if accelerator.is_local_main_process:
+            print(f"[resume] rank {rank}: from {resume_dir} @ step {start_step} tokens {tokens_seen/1e9:.2f}B",
+                  flush=True)
+    # Every rank has to restart from the same step. A node without the checkpoint would start from
+    # zero, and DDP would hang on the first all-reduce the others never make.
+    if world > 1:
+        steps_all = accelerator.gather(torch.tensor([start_step], device=device))
+        if int(steps_all.min()) != int(steps_all.max()):
+            raise RuntimeError(f"ranks resume from different steps {steps_all.tolist()}: without a shared "
+                               f"--out, use --ckpt_per_node so every node has its own <out>/last")
 
     s3 = None
     if args.s3_bucket and args.s3_region and is_main:
@@ -644,10 +662,11 @@ def main():
 
             if not args.no_checkpoints and (step - start_step) > 0 and step % args.ckpt_every == 0:
                 accelerator.wait_for_everyone()
-                if is_main:
-                    save_ckpt(Path(args.out) / "last", raw_model, opt, step, tokens_seen, args, best_val, ds, train_pf, s3)
+                if saves_last:
+                    save_ckpt(Path(args.out) / "last", raw_model, opt, step, tokens_seen, args, best_val, ds, train_pf,
+                              s3 if is_main else None)
     except BaseException as e:        # OOM / OS-kill / Ctrl-C -> save before dying
-        if is_main and not args.no_checkpoints:
+        if saves_last and not args.no_checkpoints:
             print(f"\n[interrupt] {type(e).__name__}: saving last checkpoint ...", flush=True)
             try:
                 save_ckpt(Path(args.out) / "last", raw_model, opt, step + 1, tokens_seen, args, best_val, ds, train_pf, s3)
@@ -660,6 +679,8 @@ def main():
             train_pf.close()       # stop prefetch thread on EVERY exit path -> no NCCL-shutdown hang
 
     accelerator.wait_for_everyone()
+    if saves_last and not is_main and not args.no_checkpoints:
+        save_ckpt(Path(args.out) / "last", raw_model, opt, min(step + 1, total_steps), tokens_seen, args, best_val, ds, train_pf)
     if is_main:
         if args.no_checkpoints:
             raw_model.save_pretrained(str(Path(args.out) / "final"))
