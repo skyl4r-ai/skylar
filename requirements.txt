@@ -1,7 +1,7 @@
-# Core
+# Core. The exact stack the runs were validated on is in constraints.txt: pip install -e . -c constraints.txt
 torch>=2.1.0
 tokenizers>=0.15.0
-transformers>=4.36.0
+transformers>=4.36.0     # validated on 4.52.4 (constraints.txt); 5.18 also passes the CPU smoke
 numpy
 
 # Optional

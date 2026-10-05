@@ -18,9 +18,12 @@ Usage:
 
 import argparse
 import sys
+from pathlib import Path
+
 import torch
 from tokenizers import Tokenizer, decoders
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # the repo root: runs without PYTHONPATH
 from models.decoder import Skylar2ForCausalLM
 
 
@@ -54,7 +57,11 @@ def load_model(path, device="auto"):
 def generate_text(model, tokenizer, prompt, device, max_tokens=200,
                   temperature=0.8, top_k=50, top_p=0.9, repetition_penalty=1.2):
     """Generate text from a prompt string."""
-    input_ids = torch.tensor([tokenizer.encode(prompt).ids], device=device)
+    # encode() wraps the text in <bos>…<eos>: a prompt ending in <eos> reads as a finished document, and a base
+    # model starts a new one instead of continuing. Only <bos> goes in front.
+    bos = tokenizer.token_to_id("<bos>")
+    ids = ([bos] if bos is not None else []) + tokenizer.encode(prompt, add_special_tokens=False).ids
+    input_ids = torch.tensor([ids], device=device)
     output_ids = model.generate(
         input_ids,
         max_new_tokens=max_tokens,

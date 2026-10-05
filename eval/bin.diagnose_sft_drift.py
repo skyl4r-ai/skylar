@@ -27,7 +27,7 @@ import torch
 import torch.nn.functional as F
 from tokenizers import Tokenizer
 
-# Assumes these are in the same directory or PYTHONPATH
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # the repo root: runs without PYTHONPATH
 from models.decoder import Skylar2ForCausalLM
 from utils.chatML import encode_chatml, create_loss_mask, get_chatml_ids
 

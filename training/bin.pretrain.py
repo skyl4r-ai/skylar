@@ -193,20 +193,25 @@ def matrix_norms(m, k=8):
     return {mats[i][0]: float(mats[i][1].detach().float().norm().item()) for i in idx}
 
 
-def save_ckpt(path, raw_model, opt, step, tokens_seen, args, best_val, ds=None, train_pf=None, s3=None):
-    """Atomic save (tmp -> os.replace, .prev backup) of model + opt + RNG + sampler/prefetch RNG.
+def save_ckpt(path, raw_model, opt, step, tokens_seen, args, best_val, ds=None, train_pf=None, s3=None,
+              data_state=None):
+    """Atomic save (tmp -> os.replace, .prev backup) of model + opt + RNG + sampler/prefetch RNG, with the
+    tokenizer next to the weights (every checkpoint can be fine-tuned or evaluated as it is).
     Optional fire-and-forget S3 upload of the finished checkpoint dir."""
     path = Path(path)
     tmp = path.with_name(path.name + ".tmp")
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir(parents=True, exist_ok=True)
     raw_model.save_pretrained(str(tmp))
+    if args.tokenizer and Path(args.tokenizer).is_file():
+        shutil.copyfile(args.tokenizer, tmp / "tokenizer.json")
     state = {
         "opt": opt.state_dict(), "step": step, "tokens_seen": tokens_seen,
         "best_val": best_val, "torch_rng": torch.get_rng_state(),
         "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
         "args": vars(args),
     }
+    state.update(data_state or {})
     if ds is not None:
         try:
             state["sampler_rng"] = ds.rng.bit_generator.state
@@ -260,7 +265,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--preset", default="test")
     ap.add_argument("--data", default=str(ROOT / "data/tokenized"))
-    ap.add_argument("--tokenizer", default=str(ROOT / "tokenizer/tokenizer.json"))
+    ap.add_argument("--tokenizer", default=None, help="default: <data>/tokenizer.json")
     ap.add_argument("--max_tokens", type=float, default=None, help="default = epochs * corpus")
     ap.add_argument("--epochs", type=float, default=1.0)
     ap.add_argument("--max_epochs", type=float, default=4.0, help="hard clamp (data-constrained)")
@@ -366,6 +371,13 @@ def main():
     set_seed(args.seed + rank)   # per-rank: each rank draws DIFFERENT windows (true data parallelism)
     ds = MemmapTokenDataset(args.data, seq_len=args.seq_len, seed=args.seed + rank)
     corpus_tok = ds.total_tokens
+    if args.tokenizer is None:                  # the data dir carries the tokenizer it was encoded with
+        args.tokenizer = str(Path(args.data) / "tokenizer.json")
+    if not Path(args.tokenizer).is_file():
+        if is_main:
+            print(f"[warn] tokenizer not found ({args.tokenizer}): checkpoints will not carry tokenizer.json, "
+                  f"and --doc_masking needs --bos_id", flush=True)
+        args.tokenizer = None
 
     bos_id = args.bos_id
     if args.doc_masking and bos_id is None:
@@ -395,10 +407,10 @@ def main():
     if args.steps:
         total_steps = args.steps
     else:
+        # --max_tokens counts the whole run, also what came before a resume. The --max_epochs cap is applied
+        # after the resume (below), on the tokens drawn from THIS dataset.
         target = args.max_tokens if args.max_tokens else corpus_tok * args.epochs
-        target = min(target, corpus_tok * args.max_epochs)
         total_steps = max(1, int(target / tok_per_step))
-    implied_epochs = total_steps * tok_per_step / max(1, corpus_tok)
     milestones = sorted(int(float(x)) for x in args.milestones.split(",") if x.strip())
 
     overrides = {k: v for k, v in (("d_model", args.d_model), ("n_layers", args.n_layers),
@@ -486,6 +498,24 @@ def main():
         if accelerator.is_local_main_process:
             print(f"[resume] rank {rank}: from {resume_dir} @ step {start_step} tokens {tokens_seen/1e9:.2f}B",
                   flush=True)
+    # The burst resumes the main run's checkpoint on ANOTHER dataset. From that step its sampler starts a
+    # fresh pass (from the main run's position it would start mid-pass: about a quarter of the windows read
+    # twice and a quarter never), and the epoch cap counts this dataset only. Without the cap moving, a burst
+    # resumed with --max_tokens computed its end below the current step and did not train at all.
+    data_fp = [int(corpus_tok), len(ds.splits["train"]), len(ds.splits["val"])]
+    data_start_step = 0
+    if resume_state is not None:
+        if resume_state.get("data_fp") not in (None, data_fp):
+            data_start_step = start_step
+            if is_main:
+                print(f"[resume] new dataset {args.data}: its sampler starts at its first window", flush=True)
+        else:
+            data_start_step = resume_state.get("data_start_step", 0)
+    data_state = {"data_fp": data_fp, "data_start_step": data_start_step}
+    if not args.steps:
+        total_steps = min(total_steps, data_start_step + max(1, int(corpus_tok * args.max_epochs / tok_per_step)))
+    implied_epochs = (total_steps - data_start_step) * tok_per_step / max(1, corpus_tok)
+
     # Every rank has to restart from the same step. A node without the checkpoint would start from
     # zero, and DDP would hang on the first all-reduce the others never make.
     if world > 1:
@@ -573,9 +603,11 @@ def main():
     indexed = args.sampler == "permutation"
     train_pf = None if args.no_prefetch else Prefetcher(
         ds, "train", args.batch_size, device, seed=args.seed if indexed else args.seed + rank + 100000,
-        indexed=indexed, start=start_step * args.grad_accum, rank=rank, world=world, **batch_kwargs)
+        indexed=indexed, start=(start_step - data_start_step) * args.grad_accum, rank=rank, world=world,
+        **batch_kwargs)
     if train_pf is not None and resume_state is not None and resume_state.get("train_pf_rng") is not None:
         train_pf.set_rng_state(resume_state["train_pf_rng"])
+    interrupted = False
     try:
         for step in range(start_step, total_steps):
             lr = lr_at(step, args.warmup, total_steps, args.lr, args.min_lr_ratio,
@@ -589,7 +621,8 @@ def main():
                 if train_pf is not None:
                     batch = train_pf.next()
                 elif indexed:
-                    batch = ds.get_batch_at("train", args.batch_size, step * args.grad_accum + micro, device,
+                    batch = ds.get_batch_at("train", args.batch_size,
+                                            (step - data_start_step) * args.grad_accum + micro, device,
                                             rank=rank, world=world, seed=args.seed, **batch_kwargs)
                 else:
                     batch = ds.get_batch("train", args.batch_size, device, **batch_kwargs)
@@ -641,14 +674,14 @@ def main():
                     if vl_ce < best_val:
                         best_val = vl_ce
                         if not args.no_checkpoints:
-                            save_ckpt(Path(args.out) / "best", raw_model, opt, step, tokens_seen, args, best_val, ds, train_pf, s3)
+                            save_ckpt(Path(args.out) / "best", raw_model, opt, step, tokens_seen, args, best_val, ds, train_pf, s3, data_state=data_state)
 
             for m in ([] if args.no_checkpoints else milestones):
                 if m not in done_ms and tokens_seen >= m:
                     done_ms.add(m)
                     accelerator.wait_for_everyone()
                     if is_main:
-                        save_ckpt(Path(args.out) / f"step_tok{int(m/1e9)}B", raw_model, opt, step, tokens_seen, args, best_val, ds, train_pf, s3)
+                        save_ckpt(Path(args.out) / f"step_tok{int(m/1e9)}B", raw_model, opt, step, tokens_seen, args, best_val, ds, train_pf, s3, data_state=data_state)
                         print(f"  [milestone] snapshot @ {m/1e9:.0f}B tokens (step {step})", flush=True)
 
             # WSM: weights-only snapshots (merge candidates) — every rank steps next_wsm/barrier symmetrically
@@ -667,33 +700,43 @@ def main():
                 accelerator.wait_for_everyone()
                 if saves_last:
                     save_ckpt(Path(args.out) / "last", raw_model, opt, step, tokens_seen, args, best_val, ds, train_pf,
-                              s3 if is_main else None)
+                              s3 if is_main else None, data_state=data_state)
     except BaseException as e:        # OOM / OS-kill / Ctrl-C -> save before dying
         if saves_last and not args.no_checkpoints:
             print(f"\n[interrupt] {type(e).__name__}: saving last checkpoint ...", flush=True)
             try:
-                save_ckpt(Path(args.out) / "last", raw_model, opt, step + 1, tokens_seen, args, best_val, ds, train_pf, s3)
+                save_ckpt(Path(args.out) / "last", raw_model, opt, step + 1, tokens_seen, args, best_val, ds, train_pf, s3, data_state=data_state)
             except Exception as e2:
                 print(f"  (last-save failed: {e2})", flush=True)
         if not isinstance(e, KeyboardInterrupt):
             raise
+        interrupted = True
     finally:
         if train_pf is not None:
             train_pf.close()       # stop prefetch thread on EVERY exit path -> no NCCL-shutdown hang
 
+    if interrupted:
+        # A Ctrl-C is not the end of the run: no `final`, no DONE (a supervisor would take the run as finished).
+        # `last`, saved above, is where --resume auto restarts.
+        if is_main:
+            if metrics_fp:
+                metrics_fp.close()
+            print(f"\nINTERRUPTED at step {step + 1}/{total_steps}: resume with --resume auto "
+                  f"(from {args.out}/last)", flush=True)
+        accelerator.end_training()
+        sys.exit(130)
+
     accelerator.wait_for_everyone()
     if saves_last and not is_main and not args.no_checkpoints:
-        save_ckpt(Path(args.out) / "last", raw_model, opt, min(step + 1, total_steps), tokens_seen, args, best_val, ds, train_pf)
+        save_ckpt(Path(args.out) / "last", raw_model, opt, min(step + 1, total_steps), tokens_seen, args, best_val, ds, train_pf, data_state=data_state)
     if is_main:
         if args.no_checkpoints:
             raw_model.save_pretrained(str(Path(args.out) / "final"))
         else:
-            save_ckpt(Path(args.out) / "last", raw_model, opt, min(step + 1, total_steps), tokens_seen, args, best_val, ds, train_pf, s3)
-            save_ckpt(Path(args.out) / "final", raw_model, opt, total_steps, tokens_seen, args, best_val, ds, train_pf, s3)
-        try:
-            Tokenizer.from_file(args.tokenizer).save(str(Path(args.out) / "final" / "tokenizer.json"))
-        except Exception:
-            pass
+            save_ckpt(Path(args.out) / "last", raw_model, opt, min(step + 1, total_steps), tokens_seen, args, best_val, ds, train_pf, s3, data_state=data_state)
+            save_ckpt(Path(args.out) / "final", raw_model, opt, total_steps, tokens_seen, args, best_val, ds, train_pf, s3, data_state=data_state)
+        if args.tokenizer:                      # save_ckpt already copies it; --no_checkpoints does not
+            shutil.copyfile(args.tokenizer, Path(args.out) / "final" / "tokenizer.json")
         if metrics_fp:
             metrics_fp.close()
         print(f"\nDONE step={step} tokens={tokens_seen/1e9:.2f}B best_val={best_val:.3f} "

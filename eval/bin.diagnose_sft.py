@@ -107,7 +107,7 @@ def main():
     print("\n┌─ TEST 3: Sequenza ChatML — analisi token-per-token")
 
     # Import from the project
-    sys.path.insert(0, ".")
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     try:
         from utils.chatML import create_loss_mask, encode_chatml, get_chatml_ids
     except ImportError:

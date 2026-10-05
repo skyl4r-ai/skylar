@@ -54,8 +54,11 @@ def main():
     from tokenizers import Tokenizer
     tok = Tokenizer.from_file(args.tokenizer or str(Path(args.ckpt) / "tokenizer.json"))
     bos = tok.token_to_id("<bos>")
-    model = Skylar2ForCausalLM.from_pretrained(args.ckpt).cuda().eval()
-    ids = torch.tensor([([bos] if bos is not None else []) + tok.encode(args.prompt).ids], device="cuda")
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    model = Skylar2ForCausalLM.from_pretrained(args.ckpt).to(dev).eval()
+    # encode() would also append <eos>: the prompt is <bos> + text, the way a document starts in pretraining
+    ids = torch.tensor([([bos] if bos is not None else []) + tok.encode(args.prompt, add_special_tokens=False).ids],
+                       device=dev)
 
     ok = True
     for dt in (torch.float32, torch.bfloat16):

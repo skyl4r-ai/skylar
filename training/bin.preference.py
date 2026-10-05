@@ -79,6 +79,13 @@ def build_seq(ex, key, tok, max_len):
     return ids, labels
 
 
+def fits(ex, tok, max_len):
+    """A pair that does not fit max_len is dropped, not cut: a cut keeps the beginning and loses the end of the
+    answer with its <|im_end|>, and chosen and rejected would be compared on truncated texts (as in the SFT)."""
+    return all(len(create_loss_mask(prompt_msgs(ex) + [{"role": "assistant", "content": ex[k]}], tok)[0]) <= max_len
+               for k in ("chosen", "rejected"))
+
+
 def make_collate(tok, max_len, pad_id):
     def pad(seqs, fill):
         m = max(1, max(len(s) for s in seqs))
@@ -180,6 +187,9 @@ def main():
         pad_id = 0
 
     ds = PrefDS(args.data)
+    n_all = len(ds.rows)
+    ds.rows = [r for r in ds.rows if fits(r, tok, args.max_len)]
+    print(f"pairs longer than --max_len {args.max_len}: {n_all - len(ds.rows)} of {n_all} dropped")
     collate_fn = make_collate(tok, args.max_len, pad_id)
     val_rows = []
     if args.val_frac > 0:

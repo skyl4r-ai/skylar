@@ -1,0 +1,16 @@
+# The stack the training runs were validated on: the B200 smoke and the 2x4 A100 cluster smoke (30/09/2026),
+# and the CPU smoke from a clean clone (05/10/2026). Reproduce it with:
+#   pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cu128   # or .../whl/cpu
+#   pip install -e . -c constraints.txt
+torch==2.10.0
+triton==3.6.0
+transformers==4.52.4
+tokenizers==0.21.4
+accelerate==1.12.0
+numpy==2.4.2
+safetensors==0.7.0
+huggingface_hub==0.36.2
+# Skylar 2 hybrid (KDA): the kernel conventions change between releases without raising errors
+flash-linear-attention==0.5.2
+fla-core==0.5.2
+einops==0.8.2

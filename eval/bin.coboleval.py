@@ -37,9 +37,15 @@ INSTRUCTION = ("Complete the following COBOL subprogram. Output ONLY the WORKING
 
 
 def cobc_path():
-    path = os.environ.get("COBC") or shutil.which("cobc")
-    if not path:
-        raise SystemExit("GnuCOBOL not found: install it (apt install gnucobol) or set COBC=/path/to/cobc")
+    """cobc as an absolute path. Every test compiles inside its own temporary directory, where a relative COBC
+    would not resolve: each program would then read as a compile failure, and the scores as zero."""
+    cobc = os.environ.get("COBC")
+    if cobc:
+        path = os.path.abspath(os.path.expanduser(cobc)) if os.sep in cobc else shutil.which(cobc)
+    else:
+        path = shutil.which("cobc")
+    if not path or not os.path.isfile(path) or not os.access(path, os.X_OK):
+        raise SystemExit(f"GnuCOBOL not found ({cobc or 'no cobc on PATH'}): install it or set COBC=/path/to/cobc")
     return path
 
 
@@ -51,6 +57,24 @@ def cobc_env(cobc):
         env["LD_LIBRARY_PATH"] = f"{lib}:{env.get('LD_LIBRARY_PATH', '')}"
     env.setdefault("COB_CC", "gcc")
     return env
+
+
+def check_toolchain(cobc, env):
+    """Compile and run a trivial program the way the tests do. A broken toolchain (no C compiler, a missing
+    runtime library) has to stop the run, not read as a model that cannot write COBOL."""
+    d = Path(tempfile.mkdtemp(prefix="coboleval_check_"))
+    try:
+        (d / "hello.cbl").write_text("       IDENTIFICATION DIVISION.\n       PROGRAM-ID. HELLO.\n"
+                                     "       PROCEDURE DIVISION.\n           DISPLAY \"OK\".\n           STOP RUN.\n")
+        c = subprocess.run([cobc, "-w", "-fformat=variable", "-x", "hello.cbl", "-o", "hello"],
+                           capture_output=True, text=True, timeout=60, cwd=d, env=env)
+        ok = c.returncode == 0 and subprocess.run([str(d / "hello")], capture_output=True, text=True,
+                                                  timeout=10, cwd=d, env=env).stdout.strip() == "OK"
+        if not ok:
+            raise SystemExit(f"GnuCOBOL cannot compile and run a trivial program with {cobc}:\n"
+                             f"{(c.stderr or c.stdout).strip()[:800]}")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 # ── assembly, as in COBOLEval generate.py ─────────────────────────────────────────
@@ -136,8 +160,11 @@ def score_problem(problem, program, cobc, env, timeout=10):
         try:
             (d / f"{name}.cbl").write_text(program)
             (d / f"call_{name}.cbl").write_text(test["test"])
-            c = subprocess.run([cobc, "-w", "-fformat=variable", "-x", f"call_{name}.cbl", f"{name}.cbl", "-o", "run"],
-                               capture_output=True, text=True, timeout=30, cwd=d, env=env)
+            try:
+                c = subprocess.run([cobc, "-w", "-fformat=variable", "-x", f"call_{name}.cbl", f"{name}.cbl",
+                                    "-o", "run"], capture_output=True, text=True, timeout=30, cwd=d, env=env)
+            except OSError as e:                    # cobc itself did not start: stop instead of scoring zero
+                raise SystemExit(f"cannot run {cobc}: {e}")
             if c.returncode != 0:
                 passed = False
                 continue
@@ -185,8 +212,14 @@ class LocalModel:
             out = self.model.generate(torch.tensor([ids], device=self.dev), max_new_tokens=self.max_new_tokens,
                                       temperature=0.0 if self.greedy else 0.2, top_k=40, repetition_penalty=1.0,
                                       eos_token_id=self.tok.token_to_id("<|im_end|>"))
-        text = self.tok.decode(out[0].tolist()[len(ids):])
-        if "</think>" in text:                     # reasoning models: keep the answer only
+        gen = out[0].tolist()[len(ids):]
+        # reasoning models: keep the answer only. </think> is a special token, and decode() drops special
+        # tokens, so the split is made on the ids; the text split covers a tokenizer where it is plain text.
+        end_think = self.tok.token_to_id("</think>")
+        if end_think is not None and end_think in gen:
+            gen = gen[gen.index(end_think) + 1:]
+        text = self.tok.decode(gen)
+        if "</think>" in text:
             text = text.split("</think>", 1)[1]
         return extract_code_block(text)
 
@@ -219,6 +252,7 @@ def main():
         raise SystemExit("COBOLEval needs GnuCOBOL 3.2 or newer (Ubuntu's apt package is 3.1). Without root:\n"
                          "  micromamba create -y -p tools/gnucobol-env -c conda-forge gnucobol=3.2\n"
                          "  COBC=tools/gnucobol-env/bin/cobc python eval/bin.coboleval.py ...")
+    check_toolchain(cobc, env)
 
     if args.samples:
         completions = {}
