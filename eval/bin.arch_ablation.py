@@ -1,6 +1,6 @@
 """
 =================================================================
-@copyright: A. Ivanovitch | skyl4r.ai | 2026
+@copyright: A. Ivanovitch | CEO SKYL4R | 2026
 =================================================================
 
 Architecture ablation on a proxy model — the protocol of docs/PAPER_V2.md §5.

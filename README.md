@@ -38,7 +38,8 @@ On **COBOLEval** (146 problems, compiled and executed by GnuCOBOL, same harness 
 **Skylar-980M-Cobol beats Qwen2.5-Coder-7B, CodeLlama-7B and StarCoder2-7B** on both compile rate and
 pass@1, with about 7× fewer parameters, fully local and trained from scratch. It is a research preview
 and a COBOL specialist, not a general chatbot: read the
-[model card](https://huggingface.co/Skyl4r-Ai/Skylar-980M-Cobol).
+[model card](https://huggingface.co/Skyl4r-Ai/Skylar-980M-Cobol). The scorer is public, and the result can be
+reproduced with one command: [`eval/`](eval/README.md).
 
 ```bash
 pip install skylar
@@ -129,7 +130,7 @@ The chat model, the retrieval models and the classifier all start from the same 
 | [**`training/`**](training/README.md) | pre-training from one GPU to several nodes, checkpoint merging, SFT, preference, RL, distillation, retrieval heads |
 | [**`data/`**](data/README.md) | corpus builder with PII redaction and dedup, code-aware BPE, memory-mapped shards |
 | [**`inference/`**](inference/README.md) | streaming chat, generation, embeddings |
-| `eval/` | architecture gates, bits per byte, cache parity, Italian benchmarks, SFT diagnostics |
+| [**`eval/`**](eval/README.md) | the COBOLEval scorer (compile, run, compare), architecture gates, bits per byte and the stopping rule, cache parity, Italian benchmarks |
 
 Everything is Hugging Face-native: `save_pretrained`, `from_pretrained`, `AutoModelForCausalLM` and
 `push_to_hub` work as for any model.

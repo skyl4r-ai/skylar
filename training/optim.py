@@ -1,6 +1,6 @@
 """
 =================================================================
-@copyright: A. Ivanovitch | skyl4r.ai | 2026
+@copyright: A. Ivanovitch | CEO SKYL4R | 2026
 =================================================================
 
 Optimizer construction shared by the trainers: AdamW, or Muon on the hidden linear maps with AdamW on

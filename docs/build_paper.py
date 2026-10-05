@@ -1,6 +1,6 @@
 """
 =================================================================
-@copyright: A. Ivanovitch | skyl4r.ai | 2026
+@copyright: A. Ivanovitch | CEO SKYL4R | 2026
 =================================================================
 
 Builds an academic-style PDF (preprint layout) from a Markdown paper.

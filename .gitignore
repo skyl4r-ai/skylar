@@ -95,3 +95,4 @@ pip-skylar/
 # Evaluation-set texts are private (our corpus or third parties); only their manifests are public
 eval/postcutoff_bytes/*.txt
 eval/frozen_bytes/*.txt
+eval/COBOLEval/
