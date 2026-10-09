@@ -214,8 +214,11 @@ def gate_g2_document_isolation(preset, vocab):
     from models.config import get_config
     from models.layers.kda import SkylarKDA, ShortConv, positions_in_segment
 
-    # (a) la conv corta è esatta, non solo approssimata — in fp64, dove non ci sono
-    #     alibi di arrotondamento
+    # (a) la conv corta è esatta, non solo approssimata — in fp64. "Esatta" vuol dire
+    #     entro l'arrotondamento del fp64, non bit per bit: su un'altra CPU (pod RunPod
+    #     con 2 A100, 09/10/2026) conv1d somma in un altro ordine e dà 4,4e-16 (2 ulp).
+    #     Un confine fra documenti che perde darebbe un errore dell'ordine dei valori
+    #     (~1e-1): 1e-12 lo separa da quello di 11 ordini di grandezza.
     conv = ShortConv(32, 4).double()
     x = t.randn(1, 16, 32, dtype=t.double)
     pos_one = positions_in_segment(t.tensor([0, 16], dtype=t.int32), 16)
@@ -223,7 +226,7 @@ def gate_g2_document_isolation(preset, vocab):
     d_one = (conv(x)[0] - conv(x, pos_in_seg=pos_one)[0]).abs().max().item()
     d_two = (conv(x, pos_in_seg=pos_two)[0]
              - t.cat([conv(x[:, :8])[0], conv(x[:, 8:])[0]], 1)).abs().max().item()
-    report("G2 short conv esatta (fp64)", d_one == 0.0 and d_two == 0.0,
+    report("G2 short conv esatta (fp64)", d_one < 1e-12 and d_two < 1e-12,
            f"documento unico {d_one:.1e} · due documenti vs due conv separate {d_two:.1e}")
 
     if not t.cuda.is_available():

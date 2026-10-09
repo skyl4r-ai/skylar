@@ -25,8 +25,9 @@ data/memmap_dataset.py). NOT ported (recover from git history if needed): auto-b
 µP param-group rich table, sample-during-train (--sample_every), fp16/GradScaler (obsolete — bf16
 wins), and S3 DATA download (now a pre-step: fetch shards to disk first; the loader reads local).
 """
-import argparse, json, math, os, shutil, subprocess, sys, time
+import argparse, json, math, os, shutil, signal, subprocess, sys, time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from pathlib import Path
 
 # make the repo root importable when run as a script without `pip install -e .`
@@ -36,13 +37,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import numpy as np
 import torch
 from accelerate import Accelerator
-from accelerate.utils import set_seed
+from accelerate.utils import (DDPCommunicationHookType, DistributedDataParallelKwargs, InitProcessGroupKwargs,
+                              set_seed)
 from tokenizers import Tokenizer
 
 from models.config import get_config
 from models.decoder import Skylar2ForCausalLM
 from data.memmap_dataset import MemmapTokenDataset, Prefetcher
 from training.optim import OptimizerSet, build_optimizer
+from training.telemetry import NodeTelemetry
+from eval.bpb import bpb_sums
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -223,6 +227,8 @@ def save_ckpt(path, raw_model, opt, step, tokens_seen, args, best_val, ds=None, 
         except Exception:
             pass
     torch.save(state, tmp / "training_state.pt")
+    # what a launcher needs without loading the optimizer state (GBs): where this checkpoint is
+    (tmp / "progress.json").write_text(json.dumps({"step": step, "tokens": tokens_seen, "t": round(time.time(), 1)}))
     bak = path.with_name(path.name + ".prev")
     if path.exists():
         shutil.rmtree(bak, ignore_errors=True)
@@ -259,6 +265,64 @@ def save_weights_only(path, raw_model, meta=None, tokenizer_path=None, s3=None):
 def _needs_doc_ids(args):
     """Il modello che sta per essere costruito ha layer ricorrenti?"""
     return bool(getattr(args, "kda_ratio", None))
+
+
+# ── long runs on a scheduler: deadline, stop signals, heartbeat, status ──
+def _slurm_seconds(s):
+    """Slurm time ([days-]hours:minutes:seconds, minutes:seconds, ...) -> seconds; None if not a time."""
+    s = s.strip()
+    days = 0
+    if "-" in s:
+        d, s = s.split("-", 1)
+        days = int(d)
+    parts = [int(p) for p in s.split(":")]
+    while len(parts) < 3:
+        parts.insert(0, 0)
+    h, m, sec = parts[-3:]
+    return days * 86400 + h * 3600 + m * 60 + sec
+
+
+def parse_deadline(spec):
+    """When the job ends, as a unix time. `spec`: a unix time, `+90m` / `+2h` / `+600s` from now, or
+    `slurm` = the time left to this Slurm job (squeue %L). None = no deadline."""
+    if not spec:
+        return None
+    spec = str(spec).strip()
+    if spec == "slurm":
+        jid = os.environ.get("SLURM_JOB_ID")
+        if not jid:
+            return None
+        try:
+            left = subprocess.run(["squeue", "-h", "-j", jid, "-o", "%L"], capture_output=True, text=True,
+                                  timeout=60).stdout.strip()
+            return time.time() + _slurm_seconds(left)
+        except Exception as e:
+            print(f"[deadline] squeue failed ({e}): no deadline", flush=True)
+            return None
+    if spec.startswith("+"):
+        unit = spec[-1] if spec[-1] in "smh" else "s"
+        val = float(spec[1:-1] if spec[-1] in "smh" else spec[1:])
+        return time.time() + val * {"s": 1, "m": 60, "h": 3600}[unit]
+    return float(spec)
+
+
+def write_json_atomic(path, obj):
+    """A small JSON file that a reader never sees half-written (heartbeat, status)."""
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(obj))
+    os.replace(tmp, path)
+
+
+_STOP_SIGNAL = {"sig": None}
+
+
+def _on_stop_signal(signum, frame):
+    """SIGTERM (Slurm at the time limit, scancel, preemption; torchrun forwards it to the workers) and
+    SIGUSR1 (`#SBATCH --signal=USR1@600`) ask for a clean stop: the loop saves `last` at the end of the
+    current step and exits. The handler only sets a flag: saving inside a signal handler, in the middle
+    of a collective, would hang the other ranks."""
+    _STOP_SIGNAL["sig"] = signum
 
 
 def main():
@@ -328,6 +392,33 @@ def main():
     ap.add_argument("--no_checkpoints", action="store_true",
                     help="esperimenti: niente best/last/milestone e niente stato dell'ottimizzatore; "
                          "a fine run salva solo i pesi in <out>/final (un decimo dello spazio)")
+    ap.add_argument("--ckpt_every_min", type=float, default=0.0,
+                    help="also save <out>/last every N minutes of wall time (0 = off): on a cluster the "
+                         "lost work after a fault is bounded in time, not in steps")
+    ap.add_argument("--deadline", default=None,
+                    help="when the job ends: unix time, '+90m', or 'slurm' (time left to this job). The run "
+                         "saves <out>/last --stop_margin_min before it and exits cleanly (status 'deadline')")
+    ap.add_argument("--stop_margin_min", type=float, default=10.0,
+                    help="how long before --deadline to stop: longer than one step + one checkpoint save")
+    ap.add_argument("--heartbeat_s", type=float, default=30.0,
+                    help="rank 0 rewrites <out>/heartbeat.json every N seconds (0 = off): a watchdog that "
+                         "sees it go stale kills a hung job instead of letting it burn GPU hours")
+    ap.add_argument("--telemetry_s", type=float, default=30.0,
+                    help="per-node GPU power/energy sampling into <out>/telemetry/<host>.jsonl (0 = off)")
+    ap.add_argument("--ddp_comm", default="fp32", choices=["fp32", "bf16"],
+                    help="gradient all-reduce precision: bf16 halves the traffic between nodes")
+    ap.add_argument("--ddp_bucket_mb", type=int, default=25, help="DDP gradient bucket size")
+    ap.add_argument("--dist_timeout_min", type=float, default=30.0,
+                    help="collective timeout: a rank that waits longer for the others fails instead of hanging "
+                         "(the first step includes torch.compile, minutes on an A100)")
+    ap.add_argument("--dist_backend", default=None, choices=["nccl", "gloo"],
+                    help="default: nccl on GPU. gloo lets several ranks share one GPU (tests on one card)")
+    ap.add_argument("--bpb_set", default=None,
+                    help="directory of frozen *.txt slices (eval/postcutoff_bytes): their bits per byte are measured "
+                         "every --bpb_every_tok tokens, with the protocol of the stopping rule (eval/bpb.py)")
+    ap.add_argument("--bpb_every_tok", type=float, default=1e9)
+    ap.add_argument("--bpb_seq_len", type=int, default=2048)
+    ap.add_argument("--bpb_stride", type=int, default=1024)
     ap.add_argument("--ckpt_per_node", action="store_true",
                     help="multi-node without a shared filesystem: every node's first process writes its own "
                          "<out>/last, so each node can resume. Never with an --out shared between nodes")
@@ -354,7 +445,17 @@ def main():
         ap.add_argument(f"--{a}", type=int, default=None)
     args = ap.parse_args()
 
-    accelerator = Accelerator(gradient_accumulation_steps=args.grad_accum)
+    signal.signal(signal.SIGTERM, _on_stop_signal)
+    signal.signal(signal.SIGUSR1, _on_stop_signal)
+    pg_kwargs = {"timeout": timedelta(minutes=args.dist_timeout_min)}
+    # only in a distributed launch: with a backend set, a single process would ask for a process group nobody created
+    if args.dist_backend and int(os.environ.get("WORLD_SIZE", "1")) > 1:
+        pg_kwargs["backend"] = args.dist_backend
+    ddp_kwargs = DistributedDataParallelKwargs(
+        bucket_cap_mb=args.ddp_bucket_mb,
+        comm_hook=DDPCommunicationHookType.BF16 if args.ddp_comm == "bf16" else DDPCommunicationHookType.NO)
+    accelerator = Accelerator(gradient_accumulation_steps=args.grad_accum,
+                              kwargs_handlers=[InitProcessGroupKwargs(**pg_kwargs), ddp_kwargs])
     device = accelerator.device
     is_main = accelerator.is_main_process
     # Who writes the resume point <out>/last: the main process, or with --ckpt_per_node the first
@@ -449,6 +550,12 @@ def main():
     # resume: load weights BEFORE prepare (so DDP broadcasts identical weights)
     start_step, tokens_seen, best_val = 0, 0, float("inf")
     resume_dir = (Path(args.out) / "last") if args.resume == "auto" else (Path(args.resume) if args.resume else None)
+    if args.resume == "auto" and not (resume_dir / "training_state.pt").exists():
+        # save_ckpt swaps `last` for the new one in two renames (last -> last.prev, last.tmp -> last): a kill
+        # between them leaves only last.prev, complete, and that is where the run continues.
+        prev = Path(args.out) / "last.prev"
+        if (prev / "training_state.pt").exists():
+            resume_dir = prev
     resume_state = None
     if resume_dir and (resume_dir / "training_state.pt").exists():
         model.load_state_dict(Skylar2ForCausalLM.from_pretrained(str(resume_dir)).state_dict())
@@ -511,7 +618,39 @@ def main():
                 print(f"[resume] new dataset {args.data}: its sampler starts at its first window", flush=True)
         else:
             data_start_step = resume_state.get("data_start_step", 0)
-    data_state = {"data_fp": data_fp, "data_start_step": data_start_step}
+
+    # Where the sampler restarts, counted in SAMPLES of this dataset, not in steps: the window of global
+    # sample k does not depend on the number of GPUs, so a resume on a different number of nodes reads the
+    # next windows and none twice. With a different global batch the steps are re-counted in the new size
+    # (the schedule, warmup and --max_tokens work in tokens).
+    samples_per_step = args.batch_size * args.grad_accum * world
+    samples_done = 0
+    if resume_state is not None and data_start_step != start_step:
+        old_args = resume_state.get("args") or {}
+        old_seq = resume_state.get("seq_len", old_args.get("seq_len", args.seq_len))
+        old_tps = resume_state.get("tok_per_step")
+        if old_tps is None:   # checkpoints written before 10/2026 do not carry it
+            per_rank = (old_args.get("batch_size", args.batch_size) * old_args.get("grad_accum", args.grad_accum)
+                        * old_seq)
+            old_world = max(1, round(tokens_seen / max(1, per_rank * max(1, start_step))))
+            old_tps = per_rank * old_world
+        if old_seq != args.seq_len:
+            # other window length, other windows: a new pass, like a new dataset
+            data_start_step, samples_done = start_step, 0
+            if is_main:
+                print(f"[resume] seq_len {old_seq} -> {args.seq_len}: the sampler starts a new pass", flush=True)
+        else:
+            samples_done = int(resume_state.get("samples_done",
+                                                (start_step - data_start_step) * old_tps // args.seq_len))
+            if old_tps != tok_per_step:
+                new_start = int(round(tokens_seen / tok_per_step))
+                data_start_step = new_start - int(round(samples_done * args.seq_len / tok_per_step))
+                if is_main:
+                    print(f"[resume] global batch {old_tps:,} -> {tok_per_step:,} tokens/step: step {start_step} "
+                          f"-> {new_start}, the sampler continues from sample {samples_done:,}", flush=True)
+                start_step = new_start
+    data_state = {"data_fp": data_fp, "data_start_step": data_start_step, "samples_done": samples_done,
+                  "tok_per_step": tok_per_step, "seq_len": args.seq_len}
     if not args.steps:
         total_steps = min(total_steps, data_start_step + max(1, int(corpus_tok * args.max_epochs / tok_per_step)))
     implied_epochs = (total_steps - data_start_step) * tok_per_step / max(1, corpus_tok)
@@ -593,20 +732,85 @@ def main():
         g = accelerator.gather(t.unsqueeze(0)).mean(0)
         return g[0].item(), g[1].item()
 
+    # Bits per byte on the frozen post-cutoff slices, live: the stopping rule (code_new < 0.512 at 20B tokens)
+    # is read from metrics.jsonl while the run goes, not from a separate job. Same protocol as
+    # eval/bin.bits_per_byte.py (eval/bpb.py), the windows split across the ranks.
+    bpb_slices = []
+    if args.bpb_set:
+        if not args.tokenizer:
+            raise SystemExit("--bpb_set needs the tokenizer (--tokenizer or <data>/tokenizer.json)")
+        _tok = Tokenizer.from_file(args.tokenizer)
+        for f in sorted(Path(args.bpb_set).glob("*.txt")):
+            text = f.read_text()
+            bpb_slices.append((f.stem, _tok.encode(text).ids, len(text.encode("utf-8"))))
+        if not bpb_slices:
+            raise SystemExit(f"--bpb_set {args.bpb_set}: no *.txt slice there (the post-cutoff texts are not in the "
+                             f"public repository: point it at your own frozen slices, or drop the flag)")
+        if is_main:
+            print(f"[bpb] {len(bpb_slices)} slices from {args.bpb_set} every {args.bpb_every_tok/1e9:g}B tokens: "
+                  + ", ".join(f"{n} ({b/1e3:.0f} KB)" for n, _, b in bpb_slices), flush=True)
+    bpb_every = int(args.bpb_every_tok) if bpb_slices and args.bpb_every_tok > 0 else 0
+    next_bpb = ((tokens_seen // bpb_every) + 1) * bpb_every if bpb_every else 0
+
+    def measure_bpb():
+        raw_model.eval()
+        sums = torch.zeros(2 * len(bpb_slices), dtype=torch.float64, device=device)
+        for i, (_, ids, _) in enumerate(bpb_slices):
+            sums[2 * i], sums[2 * i + 1] = bpb_sums(raw_model, ids, device, args.bpb_seq_len, args.bpb_stride,
+                                                    rank, world)
+        if world > 1:
+            sums = sums.to(ctl_device)
+            torch.distributed.all_reduce(sums)
+        raw_model.train()
+        return {n: float(sums[2 * i]) / math.log(2) / nb for i, (n, _, nb) in enumerate(bpb_slices)}
+
     done_ms = {m for m in milestones if (Path(args.out) / f"step_tok{int(m/1e9)}B").exists()}
     wsm_step = int(args.wsm_every_tok) if args.wsm_every_tok and args.wsm_every_tok > 0 else 0
     next_wsm = ((tokens_seen // wsm_step) + 1) * wsm_step if wsm_step else 0   # resume-safe: next multiple ahead
     step = start_step - 1
     model.train(); t0 = time.time(); seen0 = tokens_seen; train_secs = 0.0
     # permutation: ONE permutation shared by all ranks (same seed), each rank reads its own slots; the
-    # position is the number of micro-batches already trained, so a resume continues exactly.
+    # position is the number of samples already trained, so a resume continues exactly.
     indexed = args.sampler == "permutation"
+    samples_at_start = samples_done
     train_pf = None if args.no_prefetch else Prefetcher(
         ds, "train", args.batch_size, device, seed=args.seed if indexed else args.seed + rank + 100000,
-        indexed=indexed, start=(start_step - data_start_step) * args.grad_accum, rank=rank, world=world,
-        **batch_kwargs)
+        indexed=indexed, start=0, offset=samples_at_start, rank=rank, world=world, **batch_kwargs)
     if train_pf is not None and resume_state is not None and resume_state.get("train_pf_rng") is not None:
         train_pf.set_rng_state(resume_state["train_pf_rng"])
+
+    # Long runs on a scheduler: a deadline, the stop signals, a heartbeat, the status of the run, telemetry.
+    deadline = parse_deadline(args.deadline) if is_main else None
+    if is_main and deadline:
+        print(f"[deadline] stop at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(deadline))} minus "
+              f"{args.stop_margin_min:g} min", flush=True)
+    ctl_device = device
+    if world > 1 and torch.distributed.is_initialized() and torch.distributed.get_backend() != "nccl":
+        ctl_device = torch.device("cpu")
+    job_id = os.environ.get("SLURM_JOB_ID", "")
+    telemetry = None
+    if args.telemetry_s > 0 and accelerator.is_local_main_process and torch.cuda.is_available():
+        telemetry = NodeTelemetry(args.out, every_s=args.telemetry_s, tag={"job": job_id}).start()
+
+    def heartbeat(state, step_done, loss=None):
+        if not (is_main and args.heartbeat_s > 0):
+            return
+        tps_now = (tokens_seen - seen0) / train_secs if train_secs > 0 else None
+        write_json_atomic(Path(args.out) / "heartbeat.json",
+                          {"state": state, "step": step_done, "total_steps": total_steps, "tokens": tokens_seen,
+                           "samples": samples_done, "loss": loss, "tok_s": tps_now, "t": round(time.time(), 1),
+                           "job": job_id, "world": world})
+
+    def write_status(state, step_done, **extra):
+        if is_main:
+            write_json_atomic(Path(args.out) / "status.json",
+                              {"state": state, "step": step_done, "total_steps": total_steps, "tokens": tokens_seen,
+                               "t": round(time.time(), 1), "job": job_id, "world": world, **extra})
+
+    heartbeat("starting", start_step)
+    last_save_t, last_hb = time.time(), 0.0
+    steps_done = start_step          # steps whose optimizer update is complete: the resume point
+    stop_reason = None
     interrupted = False
     try:
         for step in range(start_step, total_steps):
@@ -622,8 +826,9 @@ def main():
                     batch = train_pf.next()
                 elif indexed:
                     batch = ds.get_batch_at("train", args.batch_size,
-                                            (step - data_start_step) * args.grad_accum + micro, device,
-                                            rank=rank, world=world, seed=args.seed, **batch_kwargs)
+                                            (step - start_step) * args.grad_accum + micro, device,
+                                            rank=rank, world=world, seed=args.seed, offset=samples_at_start,
+                                            **batch_kwargs)
                 else:
                     batch = ds.get_batch("train", args.batch_size, device, **batch_kwargs)
                 doc = batch[2] if len(batch) == 3 else None
@@ -637,10 +842,31 @@ def main():
                     opt.step()
                     opt.zero_grad(set_to_none=True)
                 loss_accum += loss.detach()        # stay on GPU — one GPU->CPU sync per step
-            train_loss = (loss_accum / args.grad_accum).item()
+            # The optimizer update of this step is done: count it before any collective that can still fail,
+            # so a crash from here on saves `last` at the right step (and a resume does not apply it twice).
             tokens_seen += tok_per_step
+            samples_done += samples_per_step
+            data_state["samples_done"] = samples_done
+            steps_done = step + 1
+            # Control, decided the same way on every rank, in ONE all-reduce with the loss: stop (a signal on
+            # any rank, or rank 0 past the deadline) and the time-based checkpoint (rank 0's clock). The logged
+            # train loss is the mean over ALL ranks: rank 0 alone is 1/world of the batch.
+            now = time.time()
+            sig_local = 1.0 if _STOP_SIGNAL["sig"] is not None else 0.0
+            dl_local = 1.0 if (deadline and now >= deadline - args.stop_margin_min * 60) else 0.0
+            save_local = float(is_main and args.ckpt_every_min > 0 and now - last_save_t >= args.ckpt_every_min * 60)
+            if world > 1:
+                ctl = torch.tensor([0.0, sig_local, dl_local, save_local], device=ctl_device)
+                ctl[0] = (loss_accum / args.grad_accum).float().to(ctl_device)
+                torch.distributed.all_reduce(ctl, op=torch.distributed.ReduceOp.SUM)
+                ctl = ctl.tolist()
+                train_loss, sig_any, dl_any, save_due = ctl[0] / world, ctl[1] > 0, ctl[2] > 0, ctl[3] > 0
+            else:
+                train_loss = (loss_accum / args.grad_accum).item()
+                sig_any, dl_any, save_due = sig_local > 0, dl_local > 0, save_local > 0
+            stop_code = 2 if dl_any else (1 if sig_any else 0)
             if args.log_every and is_main and step % args.log_every == 0:
-                steps_fp.write(json.dumps({"step": step, "tokens": tokens_seen, "lr": lr,
+                steps_fp.write(json.dumps({"step": step, "tokens": tokens_seen, "samples": samples_done, "lr": lr,
                                            "train_loss": train_loss, "grad_norm": grad_norm,
                                            "t": round(time.time(), 3)}) + "\n")
                 steps_fp.flush()
@@ -696,32 +922,83 @@ def main():
                                       tokenizer_path=args.tokenizer, s3=s3)
                     print(f"  [wsm] weights-only snapshot @ {tb:.2f}B tokens (step {step})", flush=True)
 
-            if not args.no_checkpoints and (step - start_step) > 0 and step % args.ckpt_every == 0:
+            if bpb_every and tokens_seen >= next_bpb:
+                while next_bpb <= tokens_seen:
+                    next_bpb += bpb_every
+                _tb = time.time()
+                bpb = measure_bpb()
+                if is_main:
+                    with open(Path(args.out) / "bpb.jsonl", "a") as _f:       # its own file: metrics.jsonl readers stay
+                        _f.write(json.dumps({"step": step, "tokens": tokens_seen, "t": round(time.time(), 1),
+                                             **{f"bpb_{k}": v for k, v in bpb.items()}}) + "\n")
+                    if use_wandb:
+                        import wandb
+                        wandb.log({f"bpb/{k}": v for k, v in bpb.items()}, step=step)
+                    print(f"  [bpb] {tokens_seen/1e9:.2f}B tokens: "
+                          + "  ".join(f"{k} {v:.4f}" for k, v in bpb.items()) + f"  ({time.time() - _tb:.0f}s)",
+                          flush=True)
+
+            # `last` holds steps_done = step + 1: the resume starts at the next step. (Until 10/2026 the periodic
+            # save wrote `step`, and a resume trained that step a second time.)
+            periodic = (step - start_step) > 0 and step % args.ckpt_every == 0
+            if not args.no_checkpoints and (periodic or save_due or stop_code):
                 accelerator.wait_for_everyone()
                 if saves_last:
-                    save_ckpt(Path(args.out) / "last", raw_model, opt, step, tokens_seen, args, best_val, ds, train_pf,
-                              s3 if is_main else None, data_state=data_state)
+                    _ts = time.time()
+                    save_ckpt(Path(args.out) / "last", raw_model, opt, steps_done, tokens_seen, args, best_val, ds,
+                              train_pf, s3 if is_main else None, data_state=data_state)
+                    if is_main:
+                        why = "stop" if stop_code else ("time" if save_due else "steps")
+                        print(f"  [ckpt] last @ step {steps_done} ({why}, {time.time() - _ts:.1f}s)", flush=True)
+                last_save_t = time.time()
+            if stop_code or now - last_hb >= args.heartbeat_s:
+                heartbeat("train", steps_done, train_loss)
+                last_hb = now
+            if stop_code:
+                stop_reason = "deadline" if stop_code == 2 else "signal"
+                break
     except BaseException as e:        # OOM / OS-kill / Ctrl-C -> save before dying
         if saves_last and not args.no_checkpoints:
             print(f"\n[interrupt] {type(e).__name__}: saving last checkpoint ...", flush=True)
             try:
-                save_ckpt(Path(args.out) / "last", raw_model, opt, step + 1, tokens_seen, args, best_val, ds, train_pf, s3, data_state=data_state)
+                save_ckpt(Path(args.out) / "last", raw_model, opt, steps_done, tokens_seen, args, best_val, ds, train_pf, s3, data_state=data_state)
             except Exception as e2:
                 print(f"  (last-save failed: {e2})", flush=True)
         if not isinstance(e, KeyboardInterrupt):
+            write_status("crashed", steps_done, error=f"{type(e).__name__}: {str(e)[:300]}")
+            if telemetry is not None:
+                telemetry.stop()
             raise
         interrupted = True
     finally:
         if train_pf is not None:
             train_pf.close()       # stop prefetch thread on EVERY exit path -> no NCCL-shutdown hang
 
+    if stop_reason:
+        # A planned stop (the job's deadline, or SIGTERM/SIGUSR1 from the scheduler): `last` is saved, the run
+        # is NOT finished. Exit 0, so a launcher does not count it as a failure; status.json says why.
+        if is_main:
+            if metrics_fp:
+                metrics_fp.close()
+            print(f"\nSTOPPED ({stop_reason}) at step {steps_done}/{total_steps}, tokens {tokens_seen/1e9:.3f}B: "
+                  f"resume with --resume auto (from {args.out}/last)", flush=True)
+        write_status(stop_reason, steps_done)
+        heartbeat(stop_reason, steps_done)
+        if telemetry is not None:
+            telemetry.stop()
+        accelerator.end_training()
+        sys.exit(0)
+
     if interrupted:
+        write_status("interrupted", steps_done)
+        if telemetry is not None:
+            telemetry.stop()
         # A Ctrl-C is not the end of the run: no `final`, no DONE (a supervisor would take the run as finished).
         # `last`, saved above, is where --resume auto restarts.
         if is_main:
             if metrics_fp:
                 metrics_fp.close()
-            print(f"\nINTERRUPTED at step {step + 1}/{total_steps}: resume with --resume auto "
+            print(f"\nINTERRUPTED at step {steps_done}/{total_steps}: resume with --resume auto "
                   f"(from {args.out}/last)", flush=True)
         accelerator.end_training()
         sys.exit(130)
@@ -741,6 +1018,10 @@ def main():
             metrics_fp.close()
         print(f"\nDONE step={step} tokens={tokens_seen/1e9:.2f}B best_val={best_val:.3f} "
               f"-> {args.out}/final ({(time.time()-t0)/3600:.1f}h)", flush=True)
+    write_status("done", steps_done, best_val=best_val)
+    heartbeat("done", steps_done)
+    if telemetry is not None:
+        telemetry.stop()
 
     accelerator.end_training()   # clean NCCL shutdown
 

@@ -66,7 +66,8 @@ explained in [`models/`](../models/README.md).
 | checkpoint merge | with `--lr_schedule constant --wsm_every_tok N` the trainer saves weight-only snapshots, and `bin.merge_wsm.py` averages the last ones (WSM, arXiv 2507.17634) |
 | memory | loss computed in chunks, so the full logits never exist at once; optional activation checkpointing (`--grad_ckpt`) |
 | checkpoints | Hugging Face format, `last` plus milestone snapshots (`--milestones`), optional async upload to S3 |
-| telemetry | `metrics.jsonl` and `train_steps.jsonl`, optional W&B (`--wandb`) |
+| telemetry | `metrics.jsonl` and `train_steps.jsonl`, optional W&B (`--wandb`); `status.json` and `heartbeat.json`; per-node power and energy from NVML (`--telemetry_s`); bits per byte on a frozen set during the run (`--bpb_set`) |
+| long runs | `--deadline` and SIGTERM/SIGUSR1 save `last` and exit cleanly; `--ckpt_every_min` saves on a timer |
 
 ### More than one GPU
 
@@ -84,8 +85,18 @@ torchrun --nnodes $NUM_NODES --node_rank $NODE_RANK --nproc_per_node 4 \
   Accelerate's bf16 path would cast the full logits to fp32.
 - **`--ckpt_per_node`** makes every node write its own `<out>/last`, for clusters without a shared disk.
   On resume the ranks check that they all start from the same step, and stop if they do not.
+- **Resume on a different number of GPUs:** the sampler position is counted in samples, so a run can continue
+  on more or fewer GPUs without repeating or skipping data.
+- **`--ddp_comm bf16`** halves the gradient traffic between nodes; `--dist_timeout_min` turns a hung
+  collective into an error.
 - **Tested:** on 2 nodes × 4 A100, training and a per-node resume. Scaling efficiency on InfiniBand is
   not yet measured.
+
+### On a Slurm cluster
+
+[`slurm/`](slurm/README.md) runs one long pretraining as a chain of 24-hour jobs: a checkpoint every 30 minutes,
+a watchdog for hung jobs, a GPU-hour budget the chain cannot exceed, day-1 checks of a new cluster, and the
+pinned environment.
 
 ## Checkpoint merge
 

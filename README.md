@@ -167,6 +167,7 @@ fall short, is in [`docs/RESULTS.md`](docs/RESULTS.md).
 - [x] COBOL specialist, validated on COBOLEval
 - [x] Skylar 2 architecture and technical report
 - [x] Multi-node training with a resume point on every node
+- [x] Long runs on Slurm: chained jobs, resume on any number of GPUs, watchdog, GPU-hour budget
 - [ ] The first Skylar 2 model at scale (990M), head to head with Skylar-980M-Cobol
 - [ ] Sharded training for the 4B and larger sizes
 - [ ] Long-context training stages

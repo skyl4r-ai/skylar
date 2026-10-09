@@ -188,20 +188,24 @@ class MemmapTokenDataset:
         return cum
 
     def get_batch_at(self, split, batch_size, batch_index, device=None, rank=0, world=1, seed=0,
-                     return_doc_ids=False, bos_id=None):
+                     return_doc_ids=False, bos_id=None, offset=0):
         """Batch number `batch_index` of a shuffled pass WITHOUT replacement over the split's
-        non-overlapping windows. Sample k = (batch_index * world + rank) * batch_size + j is window
-        perm(k mod W) of pass k // W, with a new permutation at every pass. Deterministic in
-        (seed, batch_index, rank): a resumed run continues exactly where it stopped, and the ranks of
-        a data-parallel run never read the same window. With random windows (`get_batch`) a run of
-        0.6 corpora sees only 45% of the corpus and repeats the rest; here it sees 60%, once."""
+        non-overlapping windows. Sample k = offset + (batch_index * world + rank) * batch_size + j is
+        window perm(k mod W) of pass k // W, with a new permutation at every pass. Deterministic in
+        (seed, k): a resumed run continues exactly where it stopped, and the ranks of a data-parallel
+        run never read the same window. With random windows (`get_batch`) a run of 0.6 corpora sees
+        only 45% of the corpus and repeats the rest; here it sees 60%, once.
+
+        `offset` is the number of samples the whole run has already consumed. The window of sample k
+        does not depend on world or batch_size, so a run resumed on a different number of GPUs passes
+        offset = samples consumed and batch_index from 0: it reads the next samples, none twice."""
         cum = self._window_index(split)
         n = int(cum[-1])
         shards = self.splits[split]
         T = self.seq_len
         xb = np.empty((batch_size, T), dtype=np.int64)
         yb = np.empty((batch_size, T), dtype=np.int64)
-        base = (batch_index * world + rank) * batch_size
+        base = offset + (batch_index * world + rank) * batch_size
         for j in range(batch_size):
             k = base + j
             p = _permute(k % n, n, _mix64(_mix64(seed) ^ (k // n)))
@@ -241,13 +245,15 @@ class Prefetcher:
     save/restorable (rng_state/set_rng_state) so a resumed run does not re-see the same windows.
 
     indexed=True serves `ds.get_batch_at` batches start, start+1, ... instead: the position is the
-    number of micro-batches already trained, so a resume needs no saved sampler state."""
+    number of micro-batches already trained (or `offset`, the samples already consumed by the whole
+    run, with start=0), so a resume needs no saved sampler state."""
     def __init__(self, ds, split, batch_size, device, depth=4, seed=0, indexed=False, start=0,
-                 rank=0, world=1, **batch_kwargs):
+                 rank=0, world=1, offset=0, **batch_kwargs):
         import threading, queue
         self.ds, self.split, self.bs, self.device = ds, split, batch_size, device
         self.batch_kwargs = batch_kwargs
         self.indexed, self._next, self.rank, self.world, self.seed = indexed, start, rank, world, seed
+        self.offset = offset
         self._rng = np.random.default_rng(seed)    # independent rng → no race with main-thread val batches
         self._q = queue.Queue(maxsize=depth)
         self._stop = False
@@ -260,7 +266,7 @@ class Prefetcher:
                 if self.indexed:
                     batch = self.ds.get_batch_at(self.split, self.bs, self._next, self.device,
                                                  rank=self.rank, world=self.world, seed=self.seed,
-                                                 **self.batch_kwargs)
+                                                 offset=self.offset, **self.batch_kwargs)
                     self._next += 1
                 else:
                     batch = self.ds.get_batch(self.split, self.bs, self.device,

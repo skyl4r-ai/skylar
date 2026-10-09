@@ -50,6 +50,7 @@ import torch
 from tokenizers import Tokenizer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from eval.bpb import bits_per_byte  # noqa: E402  (the shared definition)
 
 # Le slice restano separate: un numero unico nasconde i compromessi.
 SLICES = {
@@ -98,38 +99,7 @@ def build_set(out_dir, per_slice_kb=512, repo="."):
           f"smettono di valere")
 
 
-@torch.no_grad()
-def bits_per_byte(model, tok, text, device, seq_len=2048, stride=1024):
-    """
-    bpb con finestra scorrevole: ogni token è predetto avendo davanti almeno
-    `seq_len - stride` token di contesto, così il numero non dipende da dove
-    cadono i tagli.
-    """
-    n_bytes = len(text.encode("utf-8"))
-    ids = tok.encode(text).ids
-    if len(ids) < 2:
-        return None
-    total_nats, n_pred = 0.0, 0
-    for start in range(0, len(ids) - 1, stride):
-        chunk = ids[start:start + seq_len + 1]
-        if len(chunk) < 2:
-            break
-        x = torch.tensor([chunk[:-1]], device=device)
-        y = torch.tensor([chunk[1:]], device=device)
-        # Solo le posizioni con contesto sufficiente contano, tranne nella prima
-        # finestra dove non c'è alternativa.
-        skip = 0 if start == 0 else (seq_len - stride)
-        logits = model(x)["logits"].float()
-        ce = torch.nn.functional.cross_entropy(
-            logits[0, skip:], y[0, skip:], reduction="sum")
-        total_nats += ce.item()
-        n_pred += y.shape[1] - skip
-    return {
-        "bpb": total_nats / math.log(2) / n_bytes,
-        "bytes": n_bytes,
-        "tokens": n_pred,
-        "bytes_per_token": n_bytes / max(n_pred, 1),
-    }
+# the measure itself lives in eval/bpb.py, shared with the pretraining loop (--bpb_set)
 
 
 def main():
