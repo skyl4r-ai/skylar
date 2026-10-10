@@ -27,14 +27,7 @@ from models.embedder import SkylarEmbedder
 
 
 def encode(model, tok, texts, device, max_len=128, pad_id=0):
-    ids = [tok.encode(t, add_special_tokens=False).ids[:max_len] for t in texts]
-    m = max(1, max(len(x) for x in ids))
-    input_ids = torch.full((len(ids), m), pad_id, dtype=torch.long)
-    attn = torch.zeros((len(ids), m), dtype=torch.long)
-    for i, x in enumerate(ids):
-        if x:
-            input_ids[i, :len(x)] = torch.tensor(x)
-            attn[i, :len(x)] = 1
+    input_ids, attn = model.tokenize(tok, texts, max_len, pad_id)    # as in training: <eos> when it pools the last
     with torch.no_grad():
         out = model(input_ids.to(device), attention_mask=attn.to(device))
     return out["embeddings"].float().cpu()
@@ -56,7 +49,7 @@ def main():
     if pad_id is None:
         pad_id = 0
     dim = model.config.d_model
-    print(f"Embedder loaded | dim={dim} | pool={getattr(model.config,'pool_strategy','mean')}")
+    print(f"Embedder loaded | dim={dim} | {'causal' if model.causal else 'bidirectional'} | pool={model.pool_strategy}")
 
     if args.text:
         v = encode(model, tok, [args.text], args.device, pad_id=pad_id)[0]

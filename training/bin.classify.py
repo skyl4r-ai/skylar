@@ -4,8 +4,8 @@
 """
 Train SkylarClassifier — BERT-style sequence classification (non-generative).
 
-Reuses the pretrained decoder backbone (from_decoder, bidirectional) + a linear
-head. Reads {"text","label"} JSONL, cross-entropy, reports accuracy on a held-out
+Reuses the pretrained decoder backbone (from_decoder: bidirectional on a dense
+model, causal with the last token on Skylar 2) + a linear head. Reads {"text","label"} JSONL, cross-entropy, reports accuracy on a held-out
 split. No re-pretrain — same base as everything else.
 
   # real:
@@ -40,18 +40,11 @@ class TextDS(Dataset):
         return self.rows[i]["text"], int(self.rows[i]["label"])
 
 
-def make_collate(tok, max_len, pad_id):
+def make_collate(model, tok, max_len, pad_id):
     def collate(batch):
-        texts = [b[0] for b in batch]
         labels = torch.tensor([b[1] for b in batch])
-        ids = [tok.encode(t, add_special_tokens=False).ids[:max_len] for t in texts]
-        m = max(1, max(len(x) for x in ids))
-        input_ids = torch.full((len(ids), m), pad_id, dtype=torch.long)
-        attn = torch.zeros((len(ids), m), dtype=torch.long)
-        for i, x in enumerate(ids):
-            if x:
-                input_ids[i, :len(x)] = torch.tensor(x)
-                attn[i, :len(x)] = 1
+        # right padding, <eos> appended when the model pools the last token (Skylar 2)
+        input_ids, attn = model.tokenize(tok, [b[0] for b in batch], max_len, pad_id)
         return input_ids, attn, labels
     return collate
 
@@ -75,7 +68,7 @@ def main():
     ap.add_argument("--base_model", default=None)
     ap.add_argument("--preset", default=None)
     ap.add_argument("--tokenizer", default=None)
-    ap.add_argument("--pool", default="mean", choices=["mean", "cls", "last"])
+    ap.add_argument("--pool", default=None, choices=["mean", "cls", "last"], help="default: last (an appended <eos>) on Skylar 2, which reads causally; mean on dense models")
     ap.add_argument("--out_dir", default="checkpoints_cls/skylar-cls")
     ap.add_argument("--epochs", type=int, default=3)
     ap.add_argument("--max_steps", type=int, default=None)
@@ -85,6 +78,9 @@ def main():
     ap.add_argument("--max_len", type=int, default=64)
     ap.add_argument("--val_frac", type=float, default=0.1)
     ap.add_argument("--bf16", action="store_true")
+    ap.add_argument("--grad_ckpt", action="store_true",
+                    help="gradient checkpointing: recomputes the blocks in the backward to save memory "
+                         "(needed for Skylar 2 at batch 32 × 256 on 24 GB)")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--vocab_size", type=int, default=32768)
     args = ap.parse_args()
@@ -100,6 +96,9 @@ def main():
         model = SkylarClassifier(cfg)
         tok = Tokenizer.from_file(args.tokenizer)
     model = model.to(dev).train()
+    if args.grad_ckpt:
+        model.gradient_checkpointing = True
+        print("gradient checkpointing: ON")
     pad_id = tok.token_to_id("<pad>")
     if pad_id is None:
         pad_id = 0
@@ -107,7 +106,7 @@ def main():
     rows = [json.loads(l) for l in open(args.data, encoding="utf-8") if l.strip()]
     n_val = max(1, int(len(rows) * args.val_frac))
     val_rows, train_rows = rows[:n_val], rows[n_val:]
-    collate = make_collate(tok, args.max_len, pad_id)
+    collate = make_collate(model, tok, args.max_len, pad_id)
     dl = DataLoader(TextDS(train_rows), batch_size=args.batch_size, shuffle=True, drop_last=True, collate_fn=collate)
     vdl = DataLoader(TextDS(val_rows), batch_size=args.batch_size, shuffle=False, collate_fn=collate)
     total = args.max_steps or len(dl) * args.epochs

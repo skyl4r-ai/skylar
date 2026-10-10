@@ -50,17 +50,9 @@ class PairDS(Dataset):
         return self.rows[i]
 
 
-def make_collate(tok, max_len, pad_id):
+def make_collate(model, tok, max_len, pad_id):
     def enc(texts):
-        ids = [tok.encode(t, add_special_tokens=False).ids[:max_len] for t in texts]
-        m = max(1, max(len(x) for x in ids))
-        input_ids = torch.full((len(ids), m), pad_id, dtype=torch.long)
-        attn = torch.zeros((len(ids), m), dtype=torch.long)
-        for i, x in enumerate(ids):
-            if x:
-                input_ids[i, :len(x)] = torch.tensor(x)
-                attn[i, :len(x)] = 1
-        return input_ids, attn
+        return model.tokenize(tok, texts, max_len, pad_id)       # right padding, the model's own reading
 
     def collate(batch):
         return enc([b[0] for b in batch]), enc([b[1] for b in batch])
@@ -83,6 +75,9 @@ def main():
     ap.add_argument("--lambda_d", type=float, default=0.008, help="FLOPS reg weight (doc)")
     ap.add_argument("--max_len", type=int, default=128)
     ap.add_argument("--bf16", action="store_true")
+    ap.add_argument("--grad_ckpt", action="store_true",
+                    help="gradient checkpointing: recomputes the blocks in the backward to save memory "
+                         "(needed for Skylar 2 at batch 32 × 256 on 24 GB)")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--vocab_size", type=int, default=32768)
     args = ap.parse_args()
@@ -97,13 +92,16 @@ def main():
         model = SkylarSparseEncoder(get_config(args.preset, vocab_size=args.vocab_size))
         tok = Tokenizer.from_file(args.tokenizer)
     model = model.to(dev).train()
+    if args.grad_ckpt:
+        model.gradient_checkpointing = True
+        print("gradient checkpointing: ON")
     pad_id = tok.token_to_id("<pad>")
     if pad_id is None:
         pad_id = 0
 
     ds = PairDS(args.data)
     dl = DataLoader(ds, batch_size=args.batch_size, shuffle=True, drop_last=True,
-                    collate_fn=make_collate(tok, args.max_len, pad_id))
+                    collate_fn=make_collate(model, tok, args.max_len, pad_id))
     total = args.max_steps or len(dl) * args.epochs
     print(f"params={model.count_params()/1e6:.1f}M | pairs={len(ds)} | steps={total} | bs={args.batch_size}")
 

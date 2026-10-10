@@ -229,8 +229,13 @@ config = Skylar2Config(                                          # by hand
 
 [`embedder.py`](embedder.py) (dense embeddings), [`sparse_encoder.py`](sparse_encoder.py) (SPLADE-style
 sparse retrieval) and [`classifier.py`](classifier.py) reuse the decoder's weights through
-`from_decoder()`, with the heads in [`heads.py`](heads.py). They build all-attention blocks, so today they
-start from a base-decoder checkpoint such as Skylar-236M, not from a Skylar 2 hybrid.
+`from_decoder()`, with the heads in [`heads.py`](heads.py). They share [`encoder_base.py`](encoder_base.py): the
+decoder's own trunk (`Skylar2ForCausalLM._trunk`), so every architecture flag works in them too. On a dense model they
+read bidirectionally and pool the mean (Skylar-236M-Embed gives the same vectors as before, bit for bit). On a Skylar 2
+hybrid they read causally, as the KDA layers do, and pool the state of an appended `<eos>` (the E5-Mistral recipe);
+`model.tokenize()` prepares the texts that way. Checks: [`eval/bin.gate_encoders.py`](../eval/bin.gate_encoders.py).
+On a 146M hybrid pretrained for 26M tokens, one epoch on 6,256 COBOL ↔ translation pairs takes the dense embedder from
+0.6% to 57% recall@1 over 500 unseen programs (the sparse encoder reaches 41% in three epochs).
 
 ## Files
 

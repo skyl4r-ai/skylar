@@ -28,10 +28,12 @@ Niente reference model congelato (≠ DPO) → metà memoria, ideale per modelli
 ```
 Diagnostica: `margin` (logp_chosen − logp_rejected, deve salire) e `pref_acc` (deve → 1).
 
-## 2. Embeddings: encoder bidirezionale (LLM2Vec/E5-Mistral)
+## 2. Embeddings: encoder dal decoder (LLM2Vec/E5-Mistral)
 
-`models/embedder.py SkylarEmbedder` (bidirezionale, mean/cls/last pool, L2-norm) già esisteva;
-`from_decoder()` copia token_emb+blocks+ln_f dal decoder pretrained. Mancava SOLO il training.
+`models/embedder.py SkylarEmbedder` (mean/cls/last pool, L2-norm); `from_decoder()` copia il tronco del decoder
+pretrained. **Dal 10/10/2026** embedder, sparse e classificatore condividono `models/encoder_base.py`, cioè il tronco
+stesso del decoder: bidirezionali su un modello denso (come il 236M, invariato bit per bit), causali con l'ultimo token
+`<eos>` su Skylar 2 ibrido, i cui strati KDA leggono solo da sinistra a destra. Controlli: `eval/bin.gate_encoders.py`.
 - **Trainer NUOVO** `training/bin.contrastive.py`: InfoNCE + in-batch negatives, temperatura 0.05.
 - Dati: `data/gen_contrastive_data.py` → `.datasets/embed/contrastive_it.jsonl` (3600 coppie
   query↔passaggio su 30 concetti legali/bancari con definizioni reali).

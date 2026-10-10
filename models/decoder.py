@@ -286,33 +286,12 @@ class Skylar2ForCausalLM(PreTrainedModel):
             return
         validate_kv_cache(kv_cache, self.blocks, batch_size, x_device)
 
-    def forward(self, input_ids, labels=None, kv_cache=None, document_ids=None,
-                attention_mask=None, use_cache=False, return_hidden=False, loss_only=False):
-        """
-        Args:
-            input_ids:      (B, T) token indices
-            labels:         (B, T) target token indices (optional, for training)
-            kv_cache:       list of (k, v) tuples per layer (for generation)
-            document_ids:   (B, T) document IDs for packed training (optional).
-                            Enables automatic document masking via FlexAttention.
-            attention_mask: (B, 1, T, T) dense additive mask (backward compat).
-            use_cache: Bool if use cache.
-            return_hidden:  also return 'hidden', the (B, T, d_model) state the head reads (after the
-                            final norm): what an embedder pools.
-            loss_only:      with labels, compute the loss in chunks without the full logits, which are
-                            then not returned ('logits' is None): the pre-training path.
-
-        Returns:
-            dict with 'logits', 'loss' (if labels), 'kv_cache' (and 'hidden' if return_hidden)
-        """
+    def _trunk(self, input_ids, kv_cache=None, document_ids=None, attention_mask=None, use_cache=False):
+        """The shared trunk: token embedding, blocks, the final depth read and norm. Returns (x, x_pre, new_cache):
+        x is the state the head reads (after the final norm), x_pre the state before it (for the MTP heads; None
+        when AttnRes folds the norm into its read), new_cache the per-layer cache or None. The encoders
+        (models/encoder_base.py) run this same code, so they follow every architecture flag of the decoder."""
         B, T = input_ids.shape
-        # F3: attention_mask, if passed by a caller, MUST be the 4D additive form (B,1,T,T).
-        # A 2D HF-style padding mask (B,T) would silently disable causality and act as a bias.
-        if attention_mask is not None and attention_mask.dim() != 4:
-            raise ValueError(
-                f"Skylar2ForCausalLM.forward expects a 4D additive attention_mask (B,1,T,T), got "
-                f"{attention_mask.dim()}D. Build it as (1-mask)[:,None,None,:]*min_val, or pass "
-                f"document_ids for packed training.")
         x = self.drop(self.token_emb(input_ids))
 
         if kv_cache is not None:
@@ -402,6 +381,37 @@ class Skylar2ForCausalLM(PreTrainedModel):
                 x = self.res_final.mix(depth.sources())
             x_pre = x             # serve alle teste MTP, che normalizzano per conto loro
             x = self.ln_f(x)
+        return x, x_pre, new_cache
+
+    def forward(self, input_ids, labels=None, kv_cache=None, document_ids=None,
+                attention_mask=None, use_cache=False, return_hidden=False, loss_only=False):
+        """
+        Args:
+            input_ids:      (B, T) token indices
+            labels:         (B, T) target token indices (optional, for training)
+            kv_cache:       list of (k, v) tuples per layer (for generation)
+            document_ids:   (B, T) document IDs for packed training (optional).
+                            Enables automatic document masking via FlexAttention.
+            attention_mask: (B, 1, T, T) dense additive mask (backward compat).
+            use_cache: Bool if use cache.
+            return_hidden:  also return 'hidden', the (B, T, d_model) state the head reads (after the
+                            final norm): what an embedder pools.
+            loss_only:      with labels, compute the loss in chunks without the full logits, which are
+                            then not returned ('logits' is None): the pre-training path.
+
+        Returns:
+            dict with 'logits', 'loss' (if labels), 'kv_cache' (and 'hidden' if return_hidden)
+        """
+        B, T = input_ids.shape
+        # F3: attention_mask, if passed by a caller, MUST be the 4D additive form (B,1,T,T).
+        # A 2D HF-style padding mask (B,T) would silently disable causality and act as a bias.
+        if attention_mask is not None and attention_mask.dim() != 4:
+            raise ValueError(
+                f"Skylar2ForCausalLM.forward expects a 4D additive attention_mask (B,1,T,T), got "
+                f"{attention_mask.dim()}D. Build it as (1-mask)[:,None,None,:]*min_val, or pass "
+                f"document_ids for packed training.")
+        x, x_pre, new_cache = self._trunk(input_ids, kv_cache=kv_cache, document_ids=document_ids,
+                                          attention_mask=attention_mask, use_cache=use_cache)
         loss = None
         loss_parts = {}
         if loss_only and labels is not None:

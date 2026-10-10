@@ -70,6 +70,7 @@ with, and every program would look like a compile failure, so the scorer stops i
 ```bash
 python eval/bin.gate_arch_v2.py                  # preset test, seconds
 python eval/bin.gate_arch_v2.py --preset 1B_D    # the real size
+python eval/bin.gate_encoders.py                 # the dense, sparse and classifier encoders, dense and hybrid
 ```
 
 [`bin.arch_ablation.py`](bin.arch_ablation.py) is the ablation protocol of the report. It trains one proxy

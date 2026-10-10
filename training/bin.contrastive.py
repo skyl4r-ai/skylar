@@ -7,18 +7,20 @@ Contrastive trainer for SkylarEmbedder (InfoNCE / in-batch negatives).
 Turns the pretrained decoder into a dense text embedder — the E5-Mistral /
 GTE-Qwen / LLM2Vec recipe:
   1. pretrain decoder on next-token (cheap, lots of data)   ← done elsewhere
-  2. init bidirectional embedder from decoder weights (from_decoder)
+  2. init the embedder from the decoder weights (from_decoder): bidirectional on a dense model,
+     causal with the last token (<eos>) on Skylar 2, whose KDA layers read left to right
   3. contrastive fine-tune with InfoNCE on (query, positive) pairs ← THIS
 
-Loss: for a batch of B (query, positive) pairs, embed both sides (mean-pool,
+Loss: for a batch of B (query, positive) pairs, embed both sides (pool,
 L2-normalize), build the B×B cosine-similarity matrix scaled by 1/temperature,
 and apply cross-entropy where the positive of query i sits on the diagonal.
 Every other positive in the batch is an in-batch negative — so a larger batch
 gives more negatives and a better signal. Optionally symmetric (q→p and p→q).
 
-Note (LLM2Vec): the decoder was trained causally; running it bidirectionally is
-slightly out-of-distribution. Contrastive tuning adapts it; a short MNTP step
-first would help further (future). Works well enough directly for v1.
+Note (LLM2Vec 2404.05961): the decoder was trained causally; running a dense one
+bidirectionally is slightly out-of-distribution. Contrastive tuning adapts it; a
+short MNTP step first would help further (future). Skylar 2 stays causal, as in
+pretraining (the E5-Mistral / jina-code-embeddings recipe).
 
   # real (init from the trained base):
   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True .venv/bin/python training/bin.contrastive.py \
@@ -64,17 +66,10 @@ class PairDS(Dataset):
         return self.rows[i]
 
 
-def make_collate(tok, max_len, pad_id):
+def make_collate(model, tok, max_len, pad_id):
     def encode_batch(texts):
-        ids = [tok.encode(t, add_special_tokens=False).ids[:max_len] for t in texts]
-        m = max(1, max(len(x) for x in ids))
-        input_ids = torch.full((len(ids), m), pad_id, dtype=torch.long)
-        attn = torch.zeros((len(ids), m), dtype=torch.long)
-        for i, x in enumerate(ids):
-            if x:
-                input_ids[i, :len(x)] = torch.tensor(x)
-                attn[i, :len(x)] = 1
-        return input_ids, attn
+        # the way the model reads: right padding, <eos> appended when it pools the last token (Skylar 2)
+        return model.tokenize(tok, texts, max_len, pad_id)
 
     def collate(batch):
         q = [b[0] for b in batch]
@@ -108,7 +103,7 @@ def main():
     ap.add_argument("--base_model", default=None, help="decoder ckpt → from_decoder()")
     ap.add_argument("--preset", default=None, help="build fresh embedder (smoke) instead of from_decoder")
     ap.add_argument("--tokenizer", default=None, help="tokenizer.json (needed with --preset)")
-    ap.add_argument("--pool", default="mean", choices=["mean", "cls", "last"])
+    ap.add_argument("--pool", default=None, choices=["mean", "cls", "last"], help="default: last (an appended <eos>) on Skylar 2, which reads causally; mean on dense models")
     ap.add_argument("--out_dir", default="checkpoints_embed/skylar-embed")
     ap.add_argument("--epochs", type=int, default=1)
     ap.add_argument("--max_steps", type=int, default=None)
@@ -128,8 +123,9 @@ def main():
     dev = args.device
     # ── model ──
     if args.base_model:
-        print(f"Init embedder from decoder {args.base_model} (pool={args.pool})")
         model = SkylarEmbedder.from_decoder(args.base_model, pool_strategy=args.pool)
+        print(f"Init embedder from decoder {args.base_model} "
+              f"({'causal' if model.causal else 'bidirectional'}, pool={model.pool_strategy})")
         tok = Tokenizer.from_file(f"{args.base_model}/tokenizer.json")
     else:
         assert args.preset and args.tokenizer, "need --preset and --tokenizer without --base_model"
@@ -147,7 +143,7 @@ def main():
 
     ds = PairDS(args.data)
     dl = DataLoader(ds, batch_size=args.batch_size, shuffle=True, drop_last=True,
-                    collate_fn=make_collate(tok, args.max_len, pad_id))
+                    collate_fn=make_collate(model, tok, args.max_len, pad_id))
     steps_per_epoch = len(dl)
     total = args.max_steps or steps_per_epoch * args.epochs
     print(f"params={model.count_params()/1e6:.1f}M | pairs={len(ds)} | steps={total} | bs={args.batch_size}")
