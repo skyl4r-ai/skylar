@@ -25,7 +25,7 @@ CU=cu128
 PINS="$ROOT/constraints.txt"
 # what the training imports, beyond the pins: the framework itself is installed from the checkout (-e)
 REQS=(torch triton transformers tokenizers accelerate numpy safetensors huggingface_hub
-      flash-linear-attention fla-core einops)
+      flash-linear-attention fla-core einops rich)
 
 case "$MODE" in
   online)

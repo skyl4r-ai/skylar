@@ -15,10 +15,14 @@ job_max_gpu_h() {
 }
 
 # submit_job [extra sbatch args...] -> prints the job id
+# RUN_ENV and EXPORT_EXTRA ("NAME=value") reach the job through the environment, with a plain --export ALL: the form
+# --export ALL,NAME=value made slurmd 23.11 die ("clone: Operation not permitted") inside a container (RunPod, 10/2026).
 submit_job() {
+    export RUN_ENV
+    [ -n "${EXPORT_EXTRA:-}" ] && export "${EXPORT_EXTRA?}"
     local args=(--parsable --job-name "$JOB_NAME" --nodes "$NODES" --ntasks-per-node 1
                 --gres "gpu:$GPUS_PER_NODE" --cpus-per-task "$CPUS_PER_TASK" --time "$TIME"
-                --output "$OUT/slurm/%j.out" --export "ALL,RUN_ENV=$RUN_ENV${EXPORT_EXTRA:+,$EXPORT_EXTRA}")
+                --output "$OUT/slurm/%j.out" --export ALL)
     [ -n "${ACCOUNT:-}" ] && args+=(--account "$ACCOUNT")
     [ -n "${PARTITION:-}" ] && args+=(--partition "$PARTITION")
     [ -n "${QOS:-}" ] && args+=(--qos "$QOS")

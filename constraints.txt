@@ -14,3 +14,8 @@ huggingface_hub==0.36.2
 flash-linear-attention==0.5.2
 fla-core==0.5.2
 einops==0.8.2
+# bin.sft.py and the monitor print with rich (the 10/2026 cluster rehearsal: SFT did not start without it)
+rich==14.3.3
+markdown-it-py==4.0.0
+mdurl==0.1.2
+pygments==2.19.2

@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Skylar run monitor</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+  :root { --bg:#0b0f17; --panel:#121826; --line:#1f2937; --fg:#d6deeb; --dim:#7c8ba1; --acc:#22d3ee;
+          --ok:#22c55e; --warn:#f59e0b; --bad:#ef4444; }
+  * { box-sizing:border-box; }
+  body { background:var(--bg); color:var(--fg); font:13px/1.45 "JetBrains Mono","DejaVu Sans Mono",monospace;
+         margin:0; padding:14px; }
+  h1 { font-size:16px; margin:0; color:var(--acc); }
+  .top { display:flex; flex-wrap:wrap; gap:10px 18px; align-items:baseline; margin-bottom:10px; }
+  .badge { padding:2px 8px; border-radius:6px; font-weight:700; }
+  .train,.starting { background:#064e3b; color:#6ee7b7; } .done { background:#1e3a8a; color:#bfdbfe; }
+  .crashed { background:#7f1d1d; color:#fecaca; } .deadline,.signal,.interrupted { background:#78350f; color:#fde68a; }
+  .dim { color:var(--dim); }
+  .bar { height:8px; background:var(--line); border-radius:4px; overflow:hidden; margin:6px 0 12px; }
+  .bar > div { height:100%; background:linear-gradient(90deg,#0891b2,#22d3ee); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(420px,1fr)); gap:12px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 12px; min-width:0;
+          overflow-x:auto; }
+  .card h2 { font-size:12px; margin:0 0 6px; color:var(--dim); text-transform:uppercase; letter-spacing:.06em; }
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px; margin-bottom:12px; }
+  .kpi { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px 10px; }
+  .kpi b { display:block; font-size:18px; color:#fff; }
+  canvas { width:100% !important; height:240px !important; }
+  table { width:100%; border-collapse:collapse; }
+  td, th { padding:3px 6px; border-bottom:1px solid var(--line); text-align:right; white-space:nowrap; }
+  td:first-child, th:first-child { text-align:left; }
+  .u { display:inline-block; height:8px; background:var(--ok); border-radius:2px; vertical-align:middle; }
+  .p { margin:3px 0; } .ALARM { color:var(--bad); font-weight:700; } .WARN { color:var(--warn); } .INFO { color:var(--dim); }
+  select { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:3px; }
+  pre { white-space:pre-wrap; word-break:break-word; margin:4px 0 10px; background:#0d1320; padding:8px;
+        border-radius:6px; border-left:3px solid var(--line); }
+  pre.prompt { border-left-color:var(--acc); color:var(--dim); }
+  #samples pre { max-height:220px; overflow:auto; }
+  @media (max-width:520px) { .grid { grid-template-columns:1fr; } body { padding:10px; } }
+</style>
+</head>
+<body>
+<div class="top">
+  <h1>Skylar run monitor</h1>
+  <select id="run"></select>
+  <span id="state" class="badge">…</span>
+  <span id="where" class="dim"></span>
+  <span id="clock" class="dim"></span>
+</div>
+<div class="bar"><div id="prog" style="width:0%"></div></div>
+<div class="kpis" id="kpis"></div>
+<div class="card" id="problems" style="margin-bottom:12px"><h2>checks</h2><div id="plist"></div></div>
+<div class="grid">
+  <div class="card"><h2>loss (train, smoothed · validation)</h2><canvas id="cLoss"></canvas></div>
+  <div class="card"><h2>bits per byte on post-cutoff text</h2><canvas id="cBpb"></canvas></div>
+  <div class="card"><h2>tokens per second</h2><canvas id="cSpeed"></canvas></div>
+  <div class="card"><h2>learning rate · grad norm</h2><canvas id="cLr"></canvas></div>
+  <div class="card"><h2>power per node (W) · mean GPU use (%)</h2><canvas id="cPow"></canvas></div>
+  <div class="card"><h2>GPUs now</h2><div id="gpus"></div></div>
+  <div class="card"><h2>jobs (Slurm chain)</h2><div id="jobs" class="dim">no ledger: not a Slurm chain</div></div>
+  <div class="card"><h2>what the model writes</h2>
+    <select id="sname"></select> <span id="sinfo" class="dim"></span><div id="samples"></div></div>
+</div>
+<script>
+const C = { acc:"#22d3ee", a2:"#a78bfa", a3:"#f472b6", a4:"#34d399", a5:"#fbbf24", dim:"#7c8ba1", grid:"#1f2937" };
+const PAL = [C.acc, C.a2, C.a3, C.a4, C.a5, "#60a5fa", "#f87171", "#c084fc"];
+Chart.defaults.color = C.dim; Chart.defaults.borderColor = C.grid; Chart.defaults.font.family = "JetBrains Mono, monospace";
+Chart.defaults.animation = false; Chart.defaults.elements.point.radius = 0; Chart.defaults.elements.line.borderWidth = 1.5;
+const charts = {};
+function chart(id, datasets, opts) {
+  const cfg = { type:"line", data:{ datasets }, options:Object.assign({ parsing:false, maintainAspectRatio:false,
+    interaction:{ mode:"nearest", intersect:false }, plugins:{ legend:{ labels:{ boxWidth:10 } } },
+    scales:{ x:{ type:"linear", title:{ display:true, text:`tokens (${UN})` } } } }, opts || {}) };
+  if (charts[id]) { charts[id].data.datasets = datasets; charts[id].update(); return; }
+  charts[id] = new Chart(document.getElementById(id), cfg);
+}
+let UNIT = 1e9, UN = "B";                     // tokens in billions, or millions for a small run
+const B = t => (t || 0) / UNIT;
+function ema(ys, a) { let m = null; return ys.map(y => (y == null ? m : (m = m == null ? y : a * y + (1 - a) * m))); }
+function dur(s) { if (s == null) return "-"; s = Math.round(s); const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+  return d ? `${d}d ${h}h` : h ? `${h}h ${String(m).padStart(2, "0")}m` : `${m}m`; }
+function fmt(x, d) { return x == null ? "-" : Number(x).toLocaleString("it-IT", { maximumFractionDigits:d ?? 0 }); }
+let runIdx = 0;
+
+async function load() {
+  const r = await (await fetch(`/api/run?i=${runIdx}`)).json();
+  [UNIT, UN] = Math.max(r.target_tokens || 0, r.tokens || 0) >= 1e9 ? [1e9, "B"] : [1e6, "M"];
+  for (const c of Object.values(charts)) if (c.options.scales.x.title.text.startsWith("tokens")) c.options.scales.x.title.text = `tokens (${UN})`;
+  const st = document.getElementById("state"); st.textContent = r.state; st.className = "badge " + r.state;
+  document.getElementById("where").textContent = r.out;
+  document.getElementById("clock").textContent = "updated " + new Date().toLocaleTimeString("it-IT");
+  const pct = r.target_tokens ? 100 * r.tokens / r.target_tokens : 0;
+  document.getElementById("prog").style.width = pct.toFixed(2) + "%";
+  const eta = r.eta_s ? new Date(Date.now() + r.eta_s * 1000).toLocaleString("it-IT", { weekday:"short", day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit" }) : "-";
+  const gpus = r.nodes.reduce((a, n) => a + n.gpus.length, 0);
+  const gpuh = r.gpu_hours_ledger || r.energy.gpu_hours;
+  const k = [
+    ["tokens", `${fmt(B(r.tokens), 2)}${UN} / ${fmt(B(r.target_tokens), 1)}${UN}`], ["progress", `${pct.toFixed(1)}%`],
+    ["step", `${fmt(r.step)} / ${fmt(r.total_steps)}`], ["tokens/s now", fmt(r.tok_s_now)], ["tokens/s run", fmt(r.tok_s_run)],
+    ["tokens/s trainer", fmt((r.evals.filter(e => e.tok_s != null).slice(-1)[0] || {}).tok_s)],
+    ["ETA", `${dur(r.eta_s)} · ${eta}`], ["GPUs", `${gpus || r.world || "-"} on ${r.nodes.length} node(s)`],
+    ["GPU hours", fmt(gpuh, 1) + (r.budget_gpu_h ? ` / ${fmt(r.budget_gpu_h)}` : "")], ["energy", `${fmt(r.energy.kwh, r.energy.kwh < 10 ? 3 : 1)} kWh`],
+    ["heartbeat", dur(r.heartbeat_age_s) + " ago"], ["job", r.job || "-"]];
+  document.getElementById("kpis").innerHTML = k.map(([a, b]) => `<div class="kpi"><span class="dim">${a}</span><b>${b}</b></div>`).join("");
+  document.getElementById("plist").innerHTML = r.problems.length ? r.problems.map(p => `<div class="p ${p.level}">[${p.level}] ${p.message}</div>`).join("")
+    : `<div class="p" style="color:#22c55e">no problems</div>`;
+
+  const sm = ema(r.steps.map(s => s.loss), 0.05);
+  chart("cLoss", [
+    { label:"train", data:r.steps.map((s, i) => ({ x:B(s.tokens), y:sm[i] })), borderColor:C.acc },
+    { label:"validation", data:r.evals.filter(e => e.val != null).map(e => ({ x:B(e.tokens), y:e.val })), borderColor:C.a3, pointRadius:2 }]);
+  const keys = [...new Set(r.bpb.flatMap(o => Object.keys(o).filter(k => k.startsWith("bpb_"))))].sort();
+  const bds = keys.map((k, i) => ({ label:k.slice(4), data:r.bpb.filter(o => o[k] != null).map(o => ({ x:B(o.tokens), y:o[k] })), borderColor:PAL[i % PAL.length], pointRadius:1.5 }));
+  if (r.stop_rule) bds.push({ label:`stop rule ${r.stop_rule[0]} ≤ ${r.stop_rule[1]} @${fmt(B(r.stop_rule[2]), 1)}${UN}`,
+    data:[{ x:B(r.stop_rule[2]), y:r.stop_rule[1] }, { x:Math.max(B(r.stop_rule[2]) * 1.5, B(r.tokens)), y:r.stop_rule[1] }], borderColor:C.dim, borderDash:[5, 4] });
+  chart("cBpb", bds);
+  chart("cSpeed", [{ label:"tokens/s", data:r.speed.map(s => ({ x:B(s.tokens), y:s.tok_s })), borderColor:C.a4 }]);
+  chart("cLr", [
+    { label:"lr", data:r.steps.map(s => ({ x:B(s.tokens), y:s.lr })), borderColor:C.a5, yAxisID:"y" },
+    { label:"grad norm", data:r.steps.map(s => ({ x:B(s.tokens), y:s.grad_norm })), borderColor:C.a2, yAxisID:"y1" }],
+    { scales:{ x:{ type:"linear", title:{ display:true, text:`tokens (${UN})` } }, y:{ position:"left" }, y1:{ position:"right", grid:{ drawOnChartArea:false } } } });
+  const t0 = Math.min(...r.nodes.flatMap(n => n.series.map(p => p.t)), Date.now() / 1000);
+  const pds = r.nodes.flatMap((n, i) => [
+    { label:`${n.host} W`, data:n.series.map(p => ({ x:(p.t - t0) / 3600, y:p.power_w })), borderColor:PAL[i % PAL.length], yAxisID:"y" },
+    { label:`${n.host} %`, data:n.series.map(p => ({ x:(p.t - t0) / 3600, y:p.util })), borderColor:PAL[i % PAL.length], borderDash:[3, 3], yAxisID:"y1" }]);
+  chart("cPow", pds, { scales:{ x:{ type:"linear", title:{ display:true, text:"hours from the first sample" } },
+    y:{ position:"left" }, y1:{ position:"right", min:0, max:100, grid:{ drawOnChartArea:false } } } });
+  document.getElementById("gpus").innerHTML = `<table><tr><th>node</th><th>gpu</th><th>use</th><th>power</th><th>memory</th><th>temp</th><th>seen</th></tr>` +
+    r.nodes.flatMap(n => n.gpus.map(g => { const u = g.util_pct || 0, col = u >= 80 ? "#22c55e" : u >= 30 ? "#f59e0b" : "#ef4444";
+      return `<tr><td>${n.host}</td><td>${g.idx}</td><td><span class="u" style="width:${u * 0.6}px;background:${col}"></span> ${u}%</td>
+      <td>${fmt(g.power_w)} W</td><td>${fmt((g.mem_used_mb || 0) / 1024, 1)} GB</td><td>${g.temp_c ?? "-"} °C</td><td>${dur(n.age_s)}</td></tr>`; })).join("") + `</table>`;
+  if (r.ledger.length) document.getElementById("jobs").innerHTML = `<table><tr><th>job</th><th>nodes</th><th>time</th><th>GPU h</th><th>steps</th><th>end</th></tr>` +
+    r.ledger.slice(-12).reverse().map(j => `<tr><td>${j.job}</td><td>${j.nodes ?? "-"}</td><td>${dur(j.elapsed_s)}</td><td>${fmt(j.gpu_h, 1)}</td>
+      <td>${fmt(j.step_start)}→${fmt(j.step_end)}</td><td>${j.end_state || j.state || "-"}</td></tr>`).join("") + `</table>`;
+  const sel = document.getElementById("sname"), names = Object.keys(r.samples);
+  if (sel.options.length !== names.length) sel.innerHTML = names.map(n => `<option>${n}</option>`).join("");
+  const list = (r.samples[sel.value] || []).slice().reverse();
+  document.getElementById("sinfo").textContent = list.length ? `${list.length} points of the run` : "no samples (--samples_prompts)";
+  const esc = s => (s || "").replace(/[&<>]/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;" })[c]);
+  document.getElementById("samples").innerHTML = list.length ? `<pre class="prompt">${esc(list[0].prompt)}</pre>` +
+    list.slice(0, 6).map(s => `<div class="dim">${fmt(B(s.tokens), 2)}${UN} tokens · step ${fmt(s.step)}</div><pre>${esc(s.completion)}</pre>`).join("") : "";
+}
+async function init() {
+  const runs = await (await fetch("/api/runs")).json();
+  const sel = document.getElementById("run");
+  sel.innerHTML = runs.map((n, i) => `<option value="${i}">${n}</option>`).join("");
+  sel.onchange = () => { runIdx = +sel.value; Object.values(charts).forEach(c => c.destroy()); for (const k in charts) delete charts[k]; load(); };
+  document.getElementById("sname").onchange = load;
+  await load(); setInterval(load, 30000);
+}
+init();
+</script>
+</body>
+</html>

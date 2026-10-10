@@ -38,7 +38,7 @@ import numpy as np
 import torch
 from accelerate import Accelerator
 from accelerate.utils import (DDPCommunicationHookType, DistributedDataParallelKwargs, InitProcessGroupKwargs,
-                              set_seed)
+                              gather_object, set_seed)
 from tokenizers import Tokenizer
 
 from models.config import get_config
@@ -448,6 +448,12 @@ def main():
     ap.add_argument("--bpb_every_tok", type=float, default=1e9)
     ap.add_argument("--bpb_seq_len", type=int, default=2048)
     ap.add_argument("--bpb_stride", type=int, default=1024)
+    ap.add_argument("--samples_prompts", default=None,
+                    help="JSONL of {name, prompt} (eval/samples_prompts.jsonl): every --samples_every_tok tokens the "
+                         "model continues each prompt, greedy, into <out>/samples.jsonl, to read what it is learning. "
+                         "The prompts are split across the ranks, so the pause is one generation long")
+    ap.add_argument("--samples_every_tok", type=float, default=10e9)
+    ap.add_argument("--samples_max_new", type=int, default=128)
     ap.add_argument("--ckpt_per_node", action="store_true",
                     help="multi-node without a shared filesystem: every node's first process writes its own "
                          "<out>/last, so each node can resume. Never with an --out shared between nodes")
@@ -813,6 +819,33 @@ def main():
         raw_model.train()
         return {n: float(sums[2 * i]) / math.log(2) / nb for i, (n, _, nb) in enumerate(bpb_slices)}
 
+    # Samples during the run: what the model writes, not only its loss. Greedy, so two points of the run compare.
+    sample_prompts = []
+    if args.samples_prompts:
+        if not args.tokenizer:
+            raise SystemExit("--samples_prompts needs the tokenizer (--tokenizer or <data>/tokenizer.json)")
+        _stok = Tokenizer.from_file(args.tokenizer)
+        _sbos, _seos = _stok.token_to_id("<bos>"), _stok.token_to_id("<eos>")
+        for line in open(args.samples_prompts, encoding="utf-8"):
+            if line.strip():
+                r = json.loads(line)
+                ids = ([_sbos] if _sbos is not None else []) + _stok.encode(r["prompt"]).ids
+                sample_prompts.append((r["name"], r["prompt"], ids))
+    samples_every = int(args.samples_every_tok) if sample_prompts and args.samples_every_tok > 0 else 0
+    next_samples = ((tokens_seen // samples_every) + 1) * samples_every if samples_every else 0
+
+    def take_samples():
+        raw_model.eval()
+        mine = []
+        with torch.no_grad(), torch.autocast(device.type, dtype=amp_dtype, enabled=(device.type == "cuda")):
+            for i in range(rank, len(sample_prompts), world):
+                name, text, ids = sample_prompts[i]
+                out = raw_model.generate(torch.tensor([ids], device=device), max_new_tokens=args.samples_max_new,
+                                         temperature=0, eos_token_id=_seos)
+                mine.append({"name": name, "prompt": text, "completion": _stok.decode(out[0, len(ids):].tolist())})
+        raw_model.train()
+        return gather_object(mine) if world > 1 else mine
+
     done_ms = {m for m in milestones if (Path(args.out) / f"step_tok{int(m/1e9)}B").exists()}
     wsm_step = int(args.wsm_every_tok) if args.wsm_every_tok and args.wsm_every_tok > 0 else 0
     next_wsm = ((tokens_seen // wsm_step) + 1) * wsm_step if wsm_step else 0   # resume-safe: next multiple ahead
@@ -987,6 +1020,19 @@ def main():
                         wandb.log({f"bpb/{k}": v for k, v in bpb.items()}, step=step)
                     print(f"  [bpb] {tokens_seen/1e9:.2f}B tokens: "
                           + "  ".join(f"{k} {v:.4f}" for k, v in bpb.items()) + f"  ({time.time() - _tb:.0f}s)",
+                          flush=True)
+
+            if samples_every and tokens_seen >= next_samples:
+                while next_samples <= tokens_seen:
+                    next_samples += samples_every
+                _ts = time.time()
+                recs = take_samples()
+                if is_main:
+                    with open(Path(args.out) / "samples.jsonl", "a", encoding="utf-8") as _f:
+                        for r in recs:
+                            _f.write(json.dumps({"step": step, "tokens": tokens_seen, "t": round(time.time(), 1), **r},
+                                                ensure_ascii=False) + "\n")
+                    print(f"  [samples] {len(recs)} prompts at {tokens_seen/1e9:.2f}B tokens ({time.time() - _ts:.0f}s)",
                           flush=True)
 
             # `last` holds steps_done = step + 1: the resume starts at the next step. (Until 10/2026 the periodic

@@ -66,7 +66,8 @@ explained in [`models/`](../models/README.md).
 | checkpoint merge | with `--lr_schedule constant --wsm_every_tok N` the trainer saves weight-only snapshots, and `bin.merge_wsm.py` averages the last ones (WSM, arXiv 2507.17634) |
 | memory | loss computed in chunks, so the full logits never exist at once; optional activation checkpointing (`--grad_ckpt`) |
 | checkpoints | Hugging Face format, `last` plus milestone snapshots (`--milestones`), optional async upload to S3 |
-| telemetry | `metrics.jsonl` and `train_steps.jsonl`, optional W&B (`--wandb`); `status.json` and `heartbeat.json`; per-node power and energy from NVML (`--telemetry_s`); bits per byte on a frozen set during the run (`--bpb_set`) |
+| telemetry | `metrics.jsonl` and `train_steps.jsonl`, optional W&B (`--wandb`); `status.json` and `heartbeat.json`; per-node power and energy from NVML (`--telemetry_s`); bits per byte on a frozen set during the run (`--bpb_set`); the model's continuation of fixed prompts during the run (`--samples_prompts`) |
+| monitor | `bin.monitor.py`: a terminal view (`top`), a browser dashboard (`serve`), checks and a watchdog (`check`, `watch`); a run on a cluster through a copy of its small files ([`monitor/`](monitor/README.md)) |
 | long runs | `--deadline` and SIGTERM/SIGUSR1 save `last` and exit cleanly; `--ckpt_every_min` saves on a timer |
 
 ### More than one GPU

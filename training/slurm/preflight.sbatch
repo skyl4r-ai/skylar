@@ -38,8 +38,10 @@ nvidia-smi > "$P/nvidia-smi.txt" 2>&1
 python -c "import torch,sys; print(sys.version); print(torch.__version__, torch.version.cuda)" >> "$P/nvidia-smi.txt" 2>&1
 
 if [[ " $PHASES " == *" env "* ]]; then
-    srun --ntasks-per-node=1 bash -c "python '$REPO/training/slurm/check_env.py' --json '$P/env_\$(hostname).json' \
-        > '$P/env_\$(hostname).log' 2>&1"
+    MN=""; [ "$N" -gt 1 ] && MN="--multinode"      # more than one node: RDMA (NET/IB) is required
+    # $(hostname) stays outside the single quotes, so that every node writes its own file
+    srun --ntasks-per-node=1 bash -c "python '$REPO/training/slurm/check_env.py' $MN --json '$P/env_'\$(hostname)'.json' \
+        > '$P/env_'\$(hostname)'.log' 2>&1"
     bad=$(grep -L "ENV OK" "$P"/env_*.log 2>/dev/null | wc -l)
     [ "$bad" -eq 0 ] && verdict env "PASS on $N nodes" || verdict env "FAIL on $bad nodes (see env_*.log)"
 fi

@@ -4,6 +4,7 @@
 # =================================================================
 # Starts (or restarts) a chained run:  bash training/slurm/submit.sh my_run.env
 # Day-1 checks instead (one job, debug QOS, no chain): bash training/slurm/submit.sh my_run.env preflight
+# (the debug QOS is Leonardo's boost_qos_dbg; PREFLIGHT_QOS="" submits without a QOS, on any other Slurm)
 # One command in the run's environment (SFT, merge, COBOLEval...), one node:
 #   bash training/slurm/submit.sh my_run.env one <time> <gpus> -- <command...>
 # Every later link is queued by the running job itself (train.sbatch). Safe to call on a run that
@@ -35,7 +36,7 @@ done
 [ -f "$DATA/pretokenized_meta.json" ] || { echo "no pretokenized_meta.json in $DATA"; exit 2; }
 mkdir -p "$OUT/slurm" "$OUT/chain"
 if [ "$MODE" = "preflight" ]; then
-    NODES=${PREFLIGHT_NODES:-2} TIME=${PREFLIGHT_TIME:-00:30:00} QOS=${PREFLIGHT_QOS:-boost_qos_dbg}
+    NODES=${PREFLIGHT_NODES:-2} TIME=${PREFLIGHT_TIME:-00:30:00} QOS=${PREFLIGHT_QOS-boost_qos_dbg}
     SBATCH_SCRIPT=preflight.sbatch JOB_NAME="$JOB_NAME-preflight"
     JOB=$(submit_job)
     log "preflight submitted: $JOB ($NODES nodes, $TIME). Verdicts in $OUT/preflight/$JOB/SUMMARY.txt"

@@ -51,13 +51,16 @@ def summary(out):
 
 
 def stalled_tail(jobs):
-    """How many of the most recent jobs ended without advancing the step (a backfilled job, whose progress
-    is unknown, neither counts nor breaks the series)."""
+    """How many of the most recent jobs ended without advancing (a backfilled job, whose progress is unknown,
+    neither counts nor breaks the series). Progress is counted in tokens: the step number is rescaled when a job
+    resumes on a different number of GPUs (step 902 on 4 GPUs is step 451 on 8), so by its steps a job that
+    resumed on more nodes would look stuck. Lines without tokens fall back to the steps."""
     n = 0
     for j in reversed(jobs):
-        if j.get("step_end") is None:
+        a, b = ("tokens_start", "tokens_end") if j.get("tokens_end") is not None else ("step_start", "step_end")
+        if j.get(b) is None:
             continue
-        if (j.get("step_end") or 0) > (j.get("step_start") or 0):
+        if (j.get(b) or 0) > (j.get(a) or 0):
             break
         n += 1
     return n

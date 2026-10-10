@@ -1,0 +1,8 @@
+{"name": "cobol_program", "prompt": "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. SUM-EVEN.\n      * Sums the even numbers from 1 to N.\n       DATA DIVISION.\n       WORKING-STORAGE SECTION.\n"}
+{"name": "cobol_chat_it", "prompt": "<|im_start|>system\nSei un esperto programmatore COBOL.<|im_end|>\n<|im_start|>user\nScrivi un paragrafo COBOL che calcola il fattoriale di N.<|im_end|>\n<|im_start|>assistant\n"}
+{"name": "cobol_explain_it", "prompt": "<|im_start|>user\nCosa fa questa istruzione COBOL?\n    MOVE ZEROS TO WS-TOTAL.<|im_end|>\n<|im_start|>assistant\n"}
+{"name": "python", "prompt": "def is_palindrome(s: str) -> bool:\n    \"\"\"Return True if s reads the same forwards and backwards.\"\"\"\n"}
+{"name": "java", "prompt": "public static int gcd(int a, int b) {\n"}
+{"name": "italian", "prompt": "La Banca d'Italia ha pubblicato oggi"}
+{"name": "english", "prompt": "The main difference between a compiler and an interpreter is"}
+{"name": "math", "prompt": "Problem: Find the sum of all positive integers n such that n^2 < 50.\nSolution:"}

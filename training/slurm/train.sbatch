@@ -88,6 +88,9 @@ LAUNCH="cd '$REPO' && exec torchrun --nnodes $SLURM_JOB_NUM_NODES --nproc-per-no
   --node-rank \$SLURM_NODEID --master-addr $MASTER --master-port ${MASTER_PORT:-29500} \
   training/bin.pretrain.py $TRAIN_ARGS --data '$DATA' --out '$OUT' --resume auto \
   $DEADLINE_ARG --ckpt_every_min ${CKPT_EVERY_MIN:-30}"
+# scancel (or a preemption) sends SIGTERM to this script too, not only to the trainer: untrapped, bash would die here
+# and the job would leave no ledger line. The trainer saves <out>/last on SIGTERM: wait for it, then write the line.
+trap 'log "SIGTERM: waiting for the trainer to save last, then the ledger line"' TERM
 srun --kill-on-bad-exit=1 --ntasks-per-node=1 --cpus-per-task="$CPUS_PER_TASK" bash -c "$LAUNCH" &
 SRUN=$!
 bash "$REPO/training/slurm/watchdog.sh" "$OUT" "$JOB_START" "${WATCHDOG_GRACE_MIN:-30}" \
@@ -95,6 +98,7 @@ bash "$REPO/training/slurm/watchdog.sh" "$OUT" "$JOB_START" "${WATCHDOG_GRACE_MI
 WD=$!
 wait "$SRUN"
 RC=$?
+while kill -0 "$SRUN" 2>/dev/null; do wait "$SRUN"; RC=$?; done    # a trapped signal ends the wait, not srun
 kill "$WD" 2>/dev/null
 wait "$WD" 2>/dev/null
 

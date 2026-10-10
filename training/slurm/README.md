@@ -24,11 +24,12 @@ nodes, a watchdog for hung jobs, a GPU-hour budget the chain cannot exceed, and 
 
 1. **May it run?** `ledger.py --can-chain`: not if the run is done, if this job could cross the GPU-hour budget,
    or if the last jobs made no progress (a crash loop would otherwise burn the allocation one job at a time).
+   Progress is counted in tokens: the step number changes scale when a job resumes on a different number of GPUs.
    Jobs killed without writing their ledger line are recovered from `sacct`.
 2. **Queue the next link now**, `--dependency=afterany`: its wait in the queue overlaps this job.
 3. **Train** with `--resume auto` and `--deadline` = the job's end: the trainer saves `<out>/last` and exits
    `STOP_MARGIN_MIN` before the time limit, and every `CKPT_EVERY_MIN` in between. SIGTERM/SIGUSR1 (scancel,
-   preemption) also save and exit.
+   preemption) also save and exit; the job script waits for that save and still writes its ledger line.
 4. **Watchdog** on the side: rank 0 rewrites `<out>/heartbeat.json` every few seconds; older than
    `WATCHDOG_STALL_MIN` (after a `WATCHDOG_GRACE_MIN` startup) means hung, and the step is killed.
 5. **Ledger line**: nodes, wall time, GPU hours, steps and tokens before and after, final state.
@@ -64,9 +65,14 @@ nodes, a watchdog for hung jobs, a GPU-hour budget the chain cannot exceed, and 
   17 GB of RAM, constant in the number of snapshots), SFT with Muon, ORPO, SimPO, GRPO with the COBOL reward and
   COBOLEval, all on the hybrid model; `one.sbatch` on a mock Slurm; `build_gnucobol.sh` online and offline (network
   blocked), with the same outcome as the previous GnuCOBOL on all 146 COBOLEval problems of a reference sample set.
-- **Not yet:** `sbatch` jobs on a real cluster (the container used for the A100 test could not start batch jobs),
-  and more than one node with this version of the trainer (multi-node DDP ran on 2x4 A100 with the previous one).
-  `preflight.sbatch` is the first check of both.
+- **A Slurm cluster of 3 nodes x 4 A100 SXM 80 GB with InfiniBand (10/10/2026):** `preflight.sbatch` all PASS
+  (NCCL on `NET/IB` with GPUDirect RDMA); the chain of 15-minute jobs with stops at the deadline; a rank frozen with
+  SIGSTOP (the watchdog killed the step after 3 minutes, the next job resumed); `scancel`; resumes 3 -> 1 -> 2 nodes
+  with no sample repeated or skipped; WSM snapshots, bits per byte and samples during the run; `one.sbatch` with SFT
+  and COBOLEval (the GnuCOBOL of `build_gnucobol.sh` scored a reference sample set exactly as at home); the run
+  watched from outside with `training/monitor/`. The 990M: 11,720 tokens/s per GPU on 3 nodes against 12,050 on one
+  (97%), peak 53.5 GiB per GPU. Six bugs of this kit found there are fixed in this version.
+- **Not yet:** Leonardo itself, and more than 3 nodes. `preflight.sbatch` is the first check there.
 
 ## Day 1 on a new cluster
 
@@ -75,6 +81,7 @@ bash training/slurm/build_env.sh online $WORK/venv/skylar cu128        # or down
 $WORK/venv/skylar/bin/python training/slurm/check_env.py                 # on a GPU node
 cp training/slurm/run.env.example my_run.env && $EDITOR my_run.env        # account, paths, NCCL_ENV
 bash training/slurm/submit.sh my_run.env preflight                       # read <out>/preflight/<job>/SUMMARY.txt
+# not on Leonardo: PREFLIGHT_QOS="" (no debug QOS), PREFLIGHT_NODES=<n>; one phase: PREFLIGHT_PHASES=env
 bash training/slurm/submit.sh my_run.env                                 # the run
 python training/slurm/ledger.py <out>                                    # where it is, GPU hours, kWh
 ```

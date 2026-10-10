@@ -12,7 +12,10 @@ Checks, each PASS/FAIL with the reason:
   3. the driver can run this torch build: a CUDA op (the driver older than the wheel's CUDA is the n.1 risk);
   4. Triton compiles and runs a kernel on the GPU (it needs ptxas and a C compiler for its launcher);
   5. flash-linear-attention: a KDA chunk forward + backward on the GPU (the kernels Skylar 2 trains with);
-  6. NCCL is available to torch.distributed.
+  6. NCCL is available to torch.distributed;
+  7. RDMA for more than one node: InfiniBand/RoCE devices and libibverbs. Without the library NCCL falls back to TCP
+     sockets without an error (on 30/09/2026 a 2-node cluster ran at 50% for this). Required with --multinode,
+     reported otherwise.
 Then the architecture gates: python eval/bin.gate_arch_v2.py (18 on a GPU).
 """
 import argparse
@@ -143,14 +146,39 @@ def nccl():
     return f"NCCL {'.'.join(map(str, torch.cuda.nccl.version()))}"
 
 
+def rdma():
+    import ctypes
+    sysfs = Path("/sys/class/infiniband")
+    devs = sorted(p.name for p in sysfs.iterdir()) if sysfs.is_dir() else []
+    try:
+        ctypes.CDLL("libibverbs.so.1")
+        lib = True
+    except OSError:
+        lib = False
+    if devs and lib:
+        return f"{len(devs)} RDMA device(s) ({', '.join(devs[:6])}), libibverbs found: NCCL can use NET/IB"
+    if devs:
+        raise RuntimeError(f"RDMA devices {', '.join(devs[:6])} but no libibverbs.so.1: NCCL will use TCP. "
+                           f"Install rdma-core / libibverbs1 + ibverbs-providers (or load the cluster's module)")
+    raise RuntimeError("no RDMA device in /sys/class/infiniband: between nodes NCCL will use TCP sockets")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--json", default=None)
+    ap.add_argument("--multinode", action="store_true", help="RDMA is required (a run on more than one node)")
     a = ap.parse_args()
     print(f"host {platform.node()}, python {sys.version.split()[0]}, {platform.platform()}")
     for name, fn in [("versions", versions), ("gpus", gpus), ("cuda op (driver vs wheel)", cuda_op),
                      ("triton kernel", triton_kernel), ("fla KDA kernel", kda_kernel), ("nccl", nccl)]:
         check(name, fn)
+    if a.multinode:
+        check("rdma (multi-node)", rdma)
+    else:
+        try:
+            print(f"  [INFO] {'rdma (multi-node)':<28} {rdma()}")
+        except Exception as e:
+            print(f"  [INFO] {'rdma (multi-node)':<28} {e} (not needed on one node)")
     ok = all(r["ok"] for r in results)
     print("ENV OK" if ok else "ENV NOT OK: fix the FAIL lines first")
     if a.json:
