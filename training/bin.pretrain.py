@@ -25,7 +25,7 @@ data/memmap_dataset.py). NOT ported (recover from git history if needed): auto-b
 µP param-group rich table, sample-during-train (--sample_every), fp16/GradScaler (obsolete — bf16
 wins), and S3 DATA download (now a pre-step: fetch shards to disk first; the loader reads local).
 """
-import argparse, json, math, os, shutil, signal, subprocess, sys, time
+import argparse, hashlib, json, math, os, shutil, signal, subprocess, sys, time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
@@ -43,7 +43,7 @@ from tokenizers import Tokenizer
 
 from models.config import get_config
 from models.decoder import Skylar2ForCausalLM
-from data.memmap_dataset import MemmapTokenDataset, Prefetcher
+from data.memmap_dataset import MemmapTokenDataset, MixtureTokenDataset, Prefetcher
 from training.optim import OptimizerSet, build_optimizer
 from training.telemetry import NodeTelemetry
 from eval.bpb import bpb_sums
@@ -282,6 +282,28 @@ def _slurm_seconds(s):
     return days * 86400 + h * 3600 + m * 60 + sec
 
 
+def parse_data_mix(spec):
+    """'path=weight,path=weight' -> [(path, weight)]. Every folder must carry the same tokenizer.json: token ids of
+    two tokenizers mixed in one model are noise that no metric shows until the end."""
+    sources = []
+    for item in spec.split(","):
+        if item.strip():
+            path, _, w = item.strip().rpartition("=")
+            if not path:
+                raise SystemExit(f"--data_mix: '{item}' is not path=weight")
+            sources.append((path, float(w)))
+    digests = {}
+    for path, _ in sources:
+        tok = Path(path) / "tokenizer.json"
+        if not tok.is_file():
+            raise SystemExit(f"--data_mix: {path} has no tokenizer.json")
+        digests[path] = hashlib.sha256(tok.read_bytes()).hexdigest()
+    if len(set(digests.values())) > 1:
+        raise SystemExit("--data_mix: the folders have different tokenizers:\n"
+                         + "\n".join(f"  {d[:12]}  {p}" for p, d in digests.items()))
+    return sources
+
+
 def parse_deadline(spec):
     """When the job ends, as a unix time. `spec`: a unix time, `+90m` / `+2h` / `+600s` from now, or
     `slurm` = the time left to this Slurm job (squeue %L). None = no deadline."""
@@ -329,6 +351,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--preset", default="test")
     ap.add_argument("--data", default=str(ROOT / "data/tokenized"))
+    ap.add_argument("--data_mix", default=None,
+                    help="several tokenized folders read as one corpus, 'path=weight,path=weight' (weights = shares "
+                         "of samples); replaces --data. Every folder carries the same tokenizer.json. The weights "
+                         "can change at a resume: every folder continues where it was")
     ap.add_argument("--tokenizer", default=None, help="default: <data>/tokenizer.json")
     ap.add_argument("--max_tokens", type=float, default=None, help="default = epochs * corpus")
     ap.add_argument("--epochs", type=float, default=1.0)
@@ -389,6 +415,9 @@ def main():
     ap.add_argument("--wsm_every_tok", type=float, default=0.0,
                     help="WSM: every N tokens save a WEIGHTS-ONLY snapshot to <out>/wsm/ (merge candidates). "
                          "0=off. Use ~2e9 during the constant-LR burst -> >=8-10 ckpt in the merge-window.")
+    ap.add_argument("--wsm_start_tok", type=float, default=0.0,
+                    help="WSM: first snapshot at this many tokens (e.g. the last ~30%% of the run). A 990M snapshot "
+                         "is 3.9 GB: every 2B tokens over a whole 200B run would be ~390 GB")
     ap.add_argument("--no_checkpoints", action="store_true",
                     help="esperimenti: niente best/last/milestone e niente stato dell'ottimizzatore; "
                          "a fine run salva solo i pesi in <out>/final (un decimo dello spazio)")
@@ -470,7 +499,12 @@ def main():
     torch.backends.cudnn.allow_tf32 = True
 
     set_seed(args.seed + rank)   # per-rank: each rank draws DIFFERENT windows (true data parallelism)
-    ds = MemmapTokenDataset(args.data, seq_len=args.seq_len, seed=args.seed + rank)
+    if args.data_mix:
+        sources = parse_data_mix(args.data_mix)
+        ds = MixtureTokenDataset(sources, seq_len=args.seq_len, seed=args.seed + rank)
+        args.data = sources[0][0]                # the tokenizer default and the messages
+    else:
+        ds = MemmapTokenDataset(args.data, seq_len=args.seq_len, seed=args.seed + rank)
     corpus_tok = ds.total_tokens
     if args.tokenizer is None:                  # the data dir carries the tokenizer it was encoded with
         args.tokenizer = str(Path(args.data) / "tokenizer.json")
@@ -609,13 +643,17 @@ def main():
     # fresh pass (from the main run's position it would start mid-pass: about a quarter of the windows read
     # twice and a quarter never), and the epoch cap counts this dataset only. Without the cap moving, a burst
     # resumed with --max_tokens computed its end below the current step and did not train at all.
-    data_fp = [int(corpus_tok), len(ds.splits["train"]), len(ds.splits["val"])]
+    # A mixture is the same data across resumes, whatever its weights and folders: MixtureTokenDataset keeps
+    # every folder's position itself (below).
+    data_fp = (["mixture"] if args.data_mix
+               else [int(corpus_tok), len(ds.splits["train"]), len(ds.splits["val"])])
     data_start_step = 0
     if resume_state is not None:
         if resume_state.get("data_fp") not in (None, data_fp):
             data_start_step = start_step
             if is_main:
-                print(f"[resume] new dataset {args.data}: its sampler starts at its first window", flush=True)
+                print(f"[resume] new dataset {args.data_mix or args.data}: its sampler starts at its first window",
+                      flush=True)
         else:
             data_start_step = resume_state.get("data_start_step", 0)
 
@@ -651,6 +689,10 @@ def main():
                 start_step = new_start
     data_state = {"data_fp": data_fp, "data_start_step": data_start_step, "samples_done": samples_done,
                   "tok_per_step": tok_per_step, "seq_len": args.seq_len}
+    if args.data_mix:
+        # weights changed since the checkpoint -> every folder's base moves to what it has given
+        old_mix = resume_state.get("mix_state") if resume_state is not None and samples_done else None
+        data_state["mix_state"] = ds.restate(old_mix, samples_done)
     if not args.steps:
         total_steps = min(total_steps, data_start_step + max(1, int(corpus_tok * args.max_epochs / tok_per_step)))
     implied_epochs = (total_steps - data_start_step) * tok_per_step / max(1, corpus_tok)
@@ -692,6 +734,13 @@ def main():
               f"doc_mask={use_doc} tok/step={tok_per_step:,} total_steps={total_steps:,} "
               f"implied_epochs={implied_epochs:.2f} sampler={args.sampler}"
               + (f" windows={ds.n_windows('train'):,}" if args.sampler == "permutation" else ""), flush=True)
+        if args.data_mix:
+            k_end = samples_done + max(0, total_steps - start_step) * samples_per_step
+            for (name, w), q, (_, p_now), (_, p_end) in zip(zip(ds.names, ds.weights), ds.quota,
+                                                           ds.passes(samples_done).items(),
+                                                           ds.passes(k_end).items()):
+                print(f"[mix] {name}: weight {w:.4f} ({q}/{ds.block} samples), passes {p_now:.3f} now, "
+                      f"{p_end:.3f} at the end", flush=True)
 
     def log_metrics(rec):
         if not is_main:
@@ -767,6 +816,8 @@ def main():
     done_ms = {m for m in milestones if (Path(args.out) / f"step_tok{int(m/1e9)}B").exists()}
     wsm_step = int(args.wsm_every_tok) if args.wsm_every_tok and args.wsm_every_tok > 0 else 0
     next_wsm = ((tokens_seen // wsm_step) + 1) * wsm_step if wsm_step else 0   # resume-safe: next multiple ahead
+    if wsm_step and next_wsm < args.wsm_start_tok:                             # nothing before the merge window
+        next_wsm = -(-int(args.wsm_start_tok) // wsm_step) * wsm_step
     step = start_step - 1
     model.train(); t0 = time.time(); seen0 = tokens_seen; train_secs = 0.0
     # permutation: ONE permutation shared by all ranks (same seed), each rank reads its own slots; the

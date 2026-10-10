@@ -61,7 +61,7 @@ explained in [`models/`](../models/README.md).
 
 | feature | detail |
 |:--|:--|
-| data | memory-mapped shards with SHA-256 checksums; sampler without repeats (`--sampler permutation`) |
+| data | memory-mapped shards with SHA-256 checksums; sampler without repeats (`--sampler permutation`); several tokenized folders with weights set at launch (`--data_mix`), which can change at a resume |
 | schedules | `cosine`, `wsd` (warmup-stable-decay), `constant` |
 | checkpoint merge | with `--lr_schedule constant --wsm_every_tok N` the trainer saves weight-only snapshots, and `bin.merge_wsm.py` averages the last ones (WSM, arXiv 2507.17634) |
 | memory | loss computed in chunks, so the full logits never exist at once; optional activation checkpointing (`--grad_ckpt`) |

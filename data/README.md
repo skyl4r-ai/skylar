@@ -52,6 +52,12 @@ pf = Prefetcher(ds, "train", 16, "cuda", seed=1234, indexed=True)   # loads whil
 Windows cross document boundaries on purpose. When attention, or a recurrent state, must not cross them,
 the loader returns per-position document ids for the mask.
 
+`MixtureTokenDataset` reads several tokenized directories as one corpus, with weights chosen when training
+starts (`bin.pretrain.py --data_mix "code=0.7,text=0.2,math=0.1"`). A corpus grows by adding a directory, and
+the mix changes without tokenizing again. Every directory keeps its own shuffled passes: a weight above its
+share of tokens repeats it, with a new order at every pass. The weights can also change when a run resumes,
+and every directory continues where it stopped. All directories must carry the same `tokenizer.json`.
+
 ## Corpus builder
 
 [`pretrain-pipeline/`](pretrain-pipeline/) turns raw documents into a clean, deduplicated, shuffled corpus.

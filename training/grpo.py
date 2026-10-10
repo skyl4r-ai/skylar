@@ -45,6 +45,7 @@ class GRPOConfig:
     bf16: bool = False
     eos_token_id: int | None = None     # None -> resolved from tok ("<|im_end|>")
     adv_eps: float = 1e-4
+    gen_batch: int = 0                  # completions decoded together (generate_group); 0 = the whole group
 
 
 def seq_logp(model, ids_1xT, prompt_len):
@@ -84,15 +85,16 @@ def grpo_train(model, tok, records, reward_fn, build_prompt, cfg=None, *, device
             p_t = torch.tensor([pids], device=dev)
             plen = p_t.shape[1]
             comps, rewards = [], []
+            # the group of one prompt is decoded in batches: the prompt is read once per batch
+            gb = cfg.gen_batch or cfg.group
             with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=amp):
-                for _ in range(cfg.group):
-                    full = model.generate(p_t, max_new_tokens=cfg.max_new,
-                                          temperature=cfg.temperature, top_p=cfg.top_p,
-                                          top_k=cfg.top_k, eos_token_id=eos)
-                    text = tok.decode(full[0, plen:].tolist())
-                    comps.append(full)
-                    r, _ = reward_fn(rec, text)
-                    rewards.append(r)
+                for k in range(0, cfg.group, gb):
+                    comps += model.generate_group(p_t, min(gb, cfg.group - k), max_new_tokens=cfg.max_new,
+                                                  temperature=cfg.temperature, top_p=cfg.top_p,
+                                                  top_k=cfg.top_k, eos_token_id=eos)
+            for full in comps:
+                r, _ = reward_fn(rec, tok.decode(full[0, plen:].tolist()))
+                rewards.append(r)
             rw = torch.tensor(rewards, device=dev)
             all_r += rewards
             all_pass += sum(1 for x in rewards if x >= 1.0)

@@ -54,10 +54,10 @@ class LocalGenerator:
         outs = []
         amp = (self.dev == "cuda")
         with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=amp):
-            for _ in range(n):                          # batch-1 generate (Skylar2ForCausalLM limit)
-                out = self.model.generate(x, max_new_tokens=self.max_new_tokens,
-                                          temperature=self.temperature, top_k=self.top_k,
-                                          eos_token_id=self.eos)
+            # the n samples of one prompt decoded together (prompt read once)
+            for out in self.model.generate_group(x, n, max_new_tokens=self.max_new_tokens,
+                                                 temperature=self.temperature, top_k=self.top_k,
+                                                 eos_token_id=self.eos):
                 outs.append(self.tok.decode(out[0].tolist()[len(ids):]))
         return outs
 

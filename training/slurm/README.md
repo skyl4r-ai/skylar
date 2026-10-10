@@ -9,6 +9,7 @@ nodes, a watchdog for hung jobs, a GPU-hour budget the chain cannot exceed, and 
 | `run.env.example` | one file per run: account, nodes, paths, training arguments, budget. Copy and fill it |
 | `submit.sh` | `bash submit.sh run.env` starts the chain; `bash submit.sh run.env preflight` runs the day-1 checks |
 | `train.sbatch` | one link of the chain (below) |
+| `one.sbatch` | one command in the run's environment, one node, no chain: SFT, preference training, GRPO, the WSM merge, COBOLEval (`bash submit.sh run.env one <time> <gpus> -- <command...>`); its hours are not in the chain's ledger, `sacct` has them |
 | `preflight.sbatch` | ~25 min on 2 debug nodes: environment, kernel gates, all-reduce (NET/IB), disk, train + resume on 1 node |
 | `watchdog.sh` | kills a training step whose heartbeat stopped (a dead node or a hung collective) |
 | `ledger.py` | GPU hours, kWh, steps and tokens per job; the budget and crash-loop checks of the chain |
@@ -16,6 +17,7 @@ nodes, a watchdog for hung jobs, a GPU-hour budget the chain cannot exceed, and 
 | `allreduce_bench.py` | all-reduce bandwidth (nccl-tests convention), and the time of one gradient all-reduce |
 | `build_env.sh` | the pinned environment: online, or a wheelhouse built elsewhere and installed without network |
 | `stage_data.sh` | the corpus from a Hugging Face bucket (or after an rsync): resumable, every shard checked against `checksums.sha256` |
+| `build_gnucobol.sh` | GnuCOBOL 3.2 without root (conda-forge, with its own C compiler), online or from packages downloaded elsewhere; checks that it compiles and runs |
 | `fsdp_bench.py` | memory and tokens/s of the 4B and 8B with FSDP2 (per-block checkpointing that keeps the AttnRes state, Muon on sharded matrices): a benchmark, not yet a trainer |
 
 ## A link of the chain
@@ -58,6 +60,10 @@ nodes, a watchdog for hung jobs, a GPU-hour budget the chain cannot exceed, and 
   the energy counter, an `srun` step with GPU gres under Slurm 23.11; `fsdp_bench.py` on the 4B and 8B.
 - **An older driver** (560, CUDA 12.6) with the cu128 wheels: `check_env.py` passes, Triton and the KDA kernels
   included.
+- **Post-training on Skylar 2 (RTX 4090, 10/10/2026):** the WSM merge (also on four real-size 990M snapshots: 40 s,
+  17 GB of RAM, constant in the number of snapshots), SFT with Muon, ORPO, SimPO, GRPO with the COBOL reward and
+  COBOLEval, all on the hybrid model; `one.sbatch` on a mock Slurm; `build_gnucobol.sh` online and offline (network
+  blocked), with the same outcome as the previous GnuCOBOL on all 146 COBOLEval problems of a reference sample set.
 - **Not yet:** `sbatch` jobs on a real cluster (the container used for the A100 test could not start batch jobs),
   and more than one node with this version of the trainer (multi-node DDP ran on 2x4 A100 with the previous one).
   `preflight.sbatch` is the first check of both.

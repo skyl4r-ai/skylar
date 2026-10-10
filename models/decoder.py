@@ -646,6 +646,106 @@ class Skylar2ForCausalLM(PreTrainedModel):
         if was_training:
             self.train()
 
+    # ─────────────────────────────────────────────────────────────
+    # Group generation: n samples of one prompt in one batch
+    # ─────────────────────────────────────────────────────────────
+    @torch.no_grad()
+    def generate_group(self, input_ids, n, max_new_tokens=200, temperature=0.8, top_k=50,
+                       top_p=0.9, repetition_penalty=1.0, eos_token_id=None):
+        """
+        n samples of ONE prompt, decoded together: what GRPO and RFT need (a group of completions per
+        prompt). The prompt is read once, its cache (attention k/v, KDA state and conv tails) is copied
+        n times, and the n rows advance one token per step; a row that reaches eos leaves the batch.
+        All rows share the prompt, so there is no padding and no mask. Same sampling as generate().
+
+        Args:
+            input_ids: (1, T) prompt
+            n:         number of samples
+            the rest:  as generate()
+
+        Returns:
+            list of n (1, T + generated_i) tensors, each ending at its eos (included) or at the limit,
+            in the format of generate().
+        """
+        assert input_ids.shape[0] == 1, f"generate_group() takes one prompt, got {input_ids.shape[0]}"
+        assert n >= 1, n
+        max_seq_len = self.config.max_seq_len
+        if input_ids.shape[1] > max_seq_len:
+            input_ids = input_ids[:, -max_seq_len:]
+        max_gen = min(max_new_tokens, max_seq_len - input_ids.shape[1])
+        if max_gen <= 0:
+            return [input_ids.clone() for _ in range(n)]
+        eos = torch.tensor(sorted({eos_token_id} if isinstance(eos_token_id, int) else set(eos_token_id or ())),
+                           dtype=torch.long, device=input_ids.device)
+
+        was_training = self.training
+        self.eval()
+        out = self.forward(input_ids, use_cache=True)
+        logits = out["logits"][:, -1, :].expand(n, -1)
+        cache = _map_cache(out["kv_cache"], lambda t: t.expand(n, *t.shape[1:]).contiguous())
+
+        rows = torch.arange(n, device=input_ids.device)          # original index of each row in the batch
+        tokens = input_ids.new_zeros(n, max_gen)
+        lengths = torch.full((n,), max_gen, dtype=torch.long, device=input_ids.device)
+        seen = None
+        if repetition_penalty != 1.0:                            # per row: the prompt plus what it generated
+            seen = torch.zeros(n, logits.size(-1), dtype=torch.bool, device=input_ids.device)
+            seen[:, input_ids[0]] = True
+
+        for t in range(max_gen):
+            if seen is not None:
+                logits = torch.where(seen, torch.where(logits > 0, logits / repetition_penalty,
+                                                       logits * repetition_penalty), logits)
+            next_token = _sample_next(logits, temperature, top_k, top_p)        # (rows, 1)
+            tokens[rows, t] = next_token[:, 0]
+            if t == max_gen - 1:
+                break
+            done = torch.isin(next_token[:, 0], eos)
+            if done.any():
+                lengths[rows[done]] = t + 1
+                keep = (~done).nonzero()[:, 0]
+                if keep.numel() == 0:
+                    break
+                rows, next_token = rows[keep], next_token[keep]
+                cache = _map_cache(cache, lambda c: c.index_select(0, keep))
+                if seen is not None:
+                    seen = seen[keep]
+            if seen is not None:
+                seen.scatter_(1, next_token, True)
+            out = self.forward(next_token, kv_cache=cache, use_cache=True)
+            logits, cache = out["logits"][:, -1, :], out["kv_cache"]
+
+        if was_training:
+            self.train()
+        return [torch.cat([input_ids[0], tokens[i, :lengths[i]]]).unsqueeze(0) for i in range(n)]
+
+
+def _map_cache(cache, fn):
+    """Applies fn to every tensor of a generation cache, whatever its nesting: (k, v) for attention,
+    (state, (conv_q, conv_k, conv_v)) for KDA, None where a layer keeps nothing. Batch is dim 0 everywhere."""
+    if cache is None:
+        return None
+    if isinstance(cache, torch.Tensor):
+        return fn(cache)
+    return type(cache)(_map_cache(c, fn) for c in cache)
+
+
+def _sample_next(logits, temperature, top_k, top_p):
+    """One token per row of (B, V) logits: greedy at temperature <= 0, otherwise temperature, top-k, top-p
+    and a draw, as in generate(). Returns (B, 1)."""
+    if temperature <= 0:
+        return logits.argmax(dim=-1, keepdim=True)
+    logits = logits / temperature
+    if top_k is not None and top_k > 0:
+        v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+        logits = logits.masked_fill(logits < v[:, -1:], -float("inf"))
+    if top_p is not None and top_p < 1.0:
+        sorted_logits, sorted_idx = torch.sort(logits, descending=True)
+        probs = F.softmax(sorted_logits, dim=-1)
+        sorted_logits = sorted_logits.masked_fill(torch.cumsum(probs, dim=-1) - probs > top_p, -float("inf"))
+        logits = sorted_logits.scatter(1, sorted_idx, sorted_logits)
+    return torch.multinomial(F.softmax(logits, dim=-1), num_samples=1)
+
 
 class NanoTransformer(Skylar2ForCausalLM):
     """Name of the checkpoints saved before 30/09/2026 (config.json: model_type "nano-transformer",

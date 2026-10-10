@@ -80,7 +80,7 @@ if torch.cuda.is_available() and "B200" in torch.cuda.get_device_name(0):
     console.print(
         f"  [yellow]⚠[/yellow] SDP backends disabled: cudnn={torch.backends.cuda.cudnn_sdp_enabled()}, flash={torch.backends.cuda.flash_sdp_enabled()}, mem={torch.backends.cuda.mem_efficient_sdp_enabled()}")
 
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Sampler
 from tokenizers import Tokenizer, decoders
 
 # make the repo root importable when run as a script without `pip install -e .` (like bin.pretrain.py)
@@ -313,6 +313,23 @@ class SFTDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.samples[idx]
+
+
+class EpochSampler(Sampler):
+    """Shuffled order fixed by (seed, epoch), so a resumed run continues the permutation where it stopped. A fresh
+    shuffle on resume would show some examples of the interrupted epoch twice and skip others. `start` skips the
+    samples of the epoch already trained."""
+
+    def __init__(self, n, seed):
+        self.n, self.seed, self.epoch, self.start = n, seed, 0, 0
+
+    def __iter__(self):
+        g = torch.Generator()
+        g.manual_seed(self.seed * 1_000_003 + self.epoch)
+        return iter(torch.randperm(self.n, generator=g)[self.start:].tolist())
+
+    def __len__(self):
+        return self.n - self.start
 
 
 def collate_fn(batch):
@@ -605,8 +622,9 @@ def train_sft(args):
 
     console.print(f"  ⚖️  im_end: {_n_ime}/{_n_train} ({_ime_ratio:.2%}) → boost=[bold]{_SPECIAL_BOOST:.1f}x[/bold]")
 
+    train_sampler = EpochSampler(len(train_ds), args.seed)
     train_loader = DataLoader(
-        train_ds, batch_size=args.batch_size, shuffle=True,
+        train_ds, batch_size=args.batch_size, sampler=train_sampler,
         collate_fn=collate_fn, num_workers=0,
         pin_memory=(device.type == "cuda"),
     )
@@ -787,7 +805,13 @@ def train_sft(args):
     train_progress.start()
     train_task = train_progress.add_task("Training", total=args.max_steps, completed=step)
 
+    # micro-batches per epoch on this rank; with Accelerate every micro-step consumes one batch per rank
+    batches_per_epoch = len(train_loader)
+    samples_per_micro = args.batch_size * (accelerator.num_processes if use_accelerate else 1)
     while step < args.max_steps:
+        # where this epoch starts: 0 normally, the first batch not yet trained after a resume
+        train_sampler.epoch, skip = divmod(micro_step, batches_per_epoch)
+        train_sampler.start = skip * samples_per_micro
         for input_ids, labels in train_loader:
             if step >= args.max_steps:
                 break

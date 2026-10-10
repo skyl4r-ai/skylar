@@ -18,7 +18,7 @@ job_max_gpu_h() {
 submit_job() {
     local args=(--parsable --job-name "$JOB_NAME" --nodes "$NODES" --ntasks-per-node 1
                 --gres "gpu:$GPUS_PER_NODE" --cpus-per-task "$CPUS_PER_TASK" --time "$TIME"
-                --output "$OUT/slurm/%j.out" --export "ALL,RUN_ENV=$RUN_ENV")
+                --output "$OUT/slurm/%j.out" --export "ALL,RUN_ENV=$RUN_ENV${EXPORT_EXTRA:+,$EXPORT_EXTRA}")
     [ -n "${ACCOUNT:-}" ] && args+=(--account "$ACCOUNT")
     [ -n "${PARTITION:-}" ] && args+=(--partition "$PARTITION")
     [ -n "${QOS:-}" ] && args+=(--qos "$QOS")
