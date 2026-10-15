@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# not "skylar": that name is the inference package on PyPI, and with the same distribution name
+# installing one silently replaces the other in the same environment
+name = "skylar-framework"
+version = "0.1.0"
+requires-python = ">=3.10"
+dynamic = ["dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[tool.setuptools.packages.find]
+include = ["models*", "data*", "training*", "eval*", "inference*", "cli*", "utils*"]
