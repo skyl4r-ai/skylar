@@ -1259,7 +1259,9 @@ def main():
         for line in open(args.samples_prompts, encoding="utf-8"):
             if line.strip():
                 r = json.loads(line)
-                ids = ([_sbos] if _sbos is not None else []) + _stok.encode(r["prompt"]).ids
+                # without add_special_tokens=False the tokenizer's post-processor wraps the prompt in <bos>...<eos>:
+                # the model then starts a new document instead of continuing the prompt (every sample until 10/2026)
+                ids = ([_sbos] if _sbos is not None else []) + _stok.encode(r["prompt"], add_special_tokens=False).ids
                 sample_prompts.append((r["name"], r["prompt"], ids))
     samples_every = int(args.samples_every_tok) if sample_prompts and args.samples_every_tok > 0 else 0
     next_samples = ((tokens_seen // samples_every) + 1) * samples_every if samples_every else 0
