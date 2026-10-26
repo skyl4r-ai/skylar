@@ -687,14 +687,14 @@ def main():
     ap.add_argument("--milestones", default="", help="comma token marks -> step_tok<N>B snapshots")
     ap.add_argument("--wsm_every_tok", type=float, default=0.0,
                     help="WSM: every N tokens save a WEIGHTS-ONLY snapshot to <out>/wsm/ (merge candidates). "
-                         "0=off. Use ~2e9 during the constant-LR burst -> >=8-10 ckpt in the merge-window.")
+                         "0=off. Space them so that the merge window holds enough snapshots to average.")
     ap.add_argument("--wsm_start_tok", type=float, default=0.0,
                     help="WSM: first snapshot at this many tokens (e.g. the last ~30%% of the run). A weights-only "
                          "snapshot of a 1B model is ~4 GB")
     ap.add_argument("--wsm_window", action="append", default=None, metavar="START:END:EVERY",
                     help="WSM: snapshots every EVERY tokens from START to END inclusive; repeatable, combines with "
-                         "--wsm_every_tok. E.g. --wsm_window 16e9:20e9:0.5e9 (a merge for an early check, read in "
-                         "place of a decay) --wsm_window 180e9:200e9:1e9 (the final merge, inside the burst)")
+                         "--wsm_every_tok. E.g. --wsm_window 16e9:20e9:0.5e9 --wsm_window 90e9:100e9:1e9 (two separate merge "
+                         "windows)")
     ap.add_argument("--no_checkpoints", action="store_true",
                     help="esperimenti: niente best/last/milestone e niente stato dell'ottimizzatore; "
                          "a fine run salva solo i pesi in <out>/final (un decimo dello spazio)")
