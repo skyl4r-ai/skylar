@@ -668,6 +668,12 @@ def main():
                     help="weight decay of the token embedding (with tied weights, also the output head) in its own "
                          "AdamW group: 0 as in OLMo 2 (arXiv 2501.00656 §3.4.2) and SmolLM3. Default: like --wd. Set "
                          "at launch: a resume across a change of the groups is refused")
+    ap.add_argument("--z_loss", type=float, default=0.0,
+                    help="z-loss on the output softmax: coef * log Z^2 per labelled token (PaLM 2204.02311: 1e-4; "
+                         "OLMo 2 2501.00656: 1e-5). 0 = off, the loss path without it")
+    ap.add_argument("--z_loss_floor", type=float, default=None,
+                    help="with --z_loss: coef * max(0, log Z - floor)^2, no pull below the floor (an assumption, "
+                         "without a source: to hold log Z where it is instead of pulling it to 0)")
     ap.add_argument("--lr_schedule", default="cosine", choices=["cosine", "wsd", "constant"])
     ap.add_argument("--lr_decay_ratio", type=float, default=0.1, help="WSD: last-fraction decay")
     ap.add_argument("--eval_every", type=int, default=1000)
@@ -895,6 +901,10 @@ def main():
             setattr(cfg, attr, max(args.seq_len, getattr(cfg, attr, 0) or 0))
 
     model = Skylar2ForCausalLM(cfg)
+    model.z_loss, model.z_loss_floor = args.z_loss, args.z_loss_floor
+    if is_main and args.z_loss:
+        print(f"[loss] z-loss {args.z_loss:g}" + (f" above log Z {args.z_loss_floor:g}"
+                                                  if args.z_loss_floor is not None else ""), flush=True)
     if args.grad_ckpt and hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable()
     n_params = sum(p.numel() for p in model.parameters())
@@ -1161,6 +1171,8 @@ def main():
         raise SystemExit(f"no validation windows: every data folder ({', '.join(vnames)}) says \"validation\": "
                          f"\"none\" in its meta; add the folder that holds the validation shards")
 
+    logit_stats = {}       # level and spread of the output logits at the last evaluation (val_loss)
+
     @torch.no_grad()
     def val_loss():
         """
@@ -1175,7 +1187,7 @@ def main():
         headline is the mean over the folders, each with the same weight: it changes only when a folder is added. A
         folder without validation ("validation": "none" in its meta, the COBOL burst) is not part of it.
         """
-        raw_model.eval(); max_logit, log_z = 0.0, float("nan")
+        raw_model.eval(); max_logit, log_z, lg_mean, lg_std = 0.0, float("nan"), float("nan"), float("nan")
         sums = torch.zeros(3 * len(vnames), dtype=torch.float64, device=device)   # per folder: loss, CE, windows
         for i, (s_idx, ks) in enumerate(vplan):
             batch = val_batch(ds, s_idx, ks, device, **batch_kwargs)
@@ -1197,6 +1209,10 @@ def main():
                         valid = y[:, :1024] != -100
                         if bool(valid.any()):
                             log_z = float(lse[valid].mean().item())
+                            # log Z = level + spread: the mean logit over the vocabulary (a shift of every logit,
+                            # which no probability sees) and the standard deviation around it (the confidence)
+                            lg_mean = float(lg.float().mean(-1)[valid].mean().item())
+                            lg_std = float(lg.float().std(-1)[valid].mean().item())
                         del lg, lse
                     except Exception as e:
                         if is_main:
@@ -1206,20 +1222,22 @@ def main():
             sums[3 * s_idx + 1] += (float(parts["ce"]) if "ce" in parts else out["loss"].item()) * len(ks)
             sums[3 * s_idx + 2] += len(ks)
         raw_model.train()
-        g = accelerator.gather(torch.cat([sums, torch.tensor([log_z, max_logit], dtype=torch.float64,
+        g = accelerator.gather(torch.cat([sums, torch.tensor([lg_mean, lg_std, log_z, max_logit], dtype=torch.float64,
                                                              device=device)]).unsqueeze(0))
-        zs = g[:, -2][torch.isfinite(g[:, -2])]
-        log_z_mean = float(zs.mean().item()) if zs.numel() else None
-        tot = g[:, :-2].sum(0).view(-1, 3)
+        def finite_mean(col):
+            v = col[torch.isfinite(col)]
+            return float(v.mean().item()) if v.numel() else None
+        log_z_mean = finite_mean(g[:, -2])
+        logit_stats.update(logit_mean=finite_mean(g[:, -4]), logit_std=finite_mean(g[:, -3]))
+        tot = g[:, :-4].sum(0).view(-1, 3)
         n = tot[:, 2].clamp(min=1)
         per_loss, per_ce = (tot[:, 0] / n).tolist(), (tot[:, 1] / n).tolist()
         keep = [i for i in range(len(vnames)) if tot[i, 2] > 0]      # folders with validation windows
         return (sum(per_loss[i] for i in keep) / len(keep), sum(per_ce[i] for i in keep) / len(keep),
                 g[:, -1].max().item(), log_z_mean, {vnames[i]: per_ce[i] for i in keep})
 
-    # Bits per byte on the frozen post-cutoff slices, live: the stopping rule (code_new < 0.512 at 20B tokens)
-    # is read from metrics.jsonl while the run goes, not from a separate job. Same protocol as
-    # eval/bin.bits_per_byte.py (eval/bpb.py), the windows split across the ranks.
+    # Bits per byte on a folder of frozen text slices, live: written to metrics.jsonl while the run goes, not by a
+    # separate job. The protocol of eval/bpb.py, the windows split across the ranks.
     bpb_slices = []
     if args.bpb_set:
         if not args.tokenizer:
@@ -1360,6 +1378,7 @@ def main():
 
             _t_step = time.time()
             loss_accum, grad_norm = torch.zeros((), device=device), 0.0
+            z_accum = torch.zeros((), device=device)
             skip_update = False
             for micro in range(args.grad_accum):
                 if train_pf is not None:
@@ -1375,7 +1394,10 @@ def main():
                 x, y = batch[0], batch[1]
                 with accelerator.accumulate(model):
                     with torch.autocast(device.type, dtype=amp_dtype, enabled=(device.type == "cuda")):
-                        loss = model(input_ids=x, labels=y, document_ids=doc, loss_only=True)["loss"]
+                        out_ = model(input_ids=x, labels=y, document_ids=doc, loss_only=True)
+                        loss = out_["loss"]
+                    if args.z_loss:
+                        z_accum += out_["loss_parts"]["z"]
                     if step in _TEST_NONFINITE_AT:             # test hook (env SKYLAR_TEST_NONFINITE_AT), off by default
                         loss = loss * float("nan")
                     accelerator.backward(loss)
@@ -1443,6 +1465,7 @@ def main():
             if args.log_every and is_main and step % args.log_every == 0:
                 steps_fp.write(json.dumps({"step": step, "tokens": tokens_seen, "samples": samples_done, "lr": lr,
                                            "train_loss": train_loss, "grad_norm": grad_norm,
+                                           **({"z_term": (z_accum / args.grad_accum).item()} if args.z_loss else {}),
                                            "t": round(time.time(), 3)}) + "\n")
                 steps_fp.flush()
             if step == start_step:
@@ -1463,6 +1486,7 @@ def main():
                            "tok_s": tps, "eta_h": eta_h,
                            "grad_norm": grad_norm, "weight_norm": wnorm, "update_ratio": upd_ratio,
                            "clip_frac": clipped / max(1, clip_window), "max_logit": vl_max_logit, "log_z": vl_log_z,
+                           **logit_stats,
                            "nonfinite_skipped": nonfinite_total, "param_spread": param_spread,
                            **({"val_ce_sources": vl_sources} if len(vl_sources) > 1 else {}),
                            "matrix_norms": matrix_norms(raw_model), "out_proj_norms": out_proj_norms(raw_model),

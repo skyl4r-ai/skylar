@@ -45,14 +45,16 @@ def get_chatml_ids(tokenizer):
 
 
 def create_loss_mask(messages, tokenizer):
-    """Loss mask for ChatML. Works with both special-token and sub-token tokenizers."""
+    """Loss mask for ChatML. Works with both special-token and sub-token tokenizers.
+    An assistant message with "train": false stays in the context without being learned: the model reads it but
+    gets no loss on it (e.g. an earlier answer that a later turn corrects)."""
     ims_ids, ime_ids = get_chatml_ids(tokenizer)
 
     all_token_ids = []
     all_labels = []
 
     for i, msg in enumerate(messages):
-        is_assistant = (msg["role"] == "assistant")
+        is_assistant = (msg["role"] == "assistant") and msg.get("train", True) is not False
 
         all_token_ids.extend(ims_ids)
         all_labels.extend([-100] * len(ims_ids))

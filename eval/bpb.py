@@ -6,7 +6,7 @@ Bits per byte with a sliding window, the measure of the stopping rule (the Skyla
 predicted with at least `seq_len - stride` tokens of context (except in the first window), so the number does
 not depend on where the cuts fall. Comparable across tokenisers and vocabularies, unlike perplexity.
 
-One definition, used by `eval/bin.bits_per_byte.py` (a checkpoint, one process) and by the pretraining loop
+One definition, used by `eval/bin.arch_ablation.py` (a checkpoint, one process) and by the pretraining loop
 (`--bpb_set`, the windows split across the ranks, the sums all-reduced).
 """
 import math

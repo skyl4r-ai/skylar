@@ -55,19 +55,45 @@ def _ce_sum(x, weight, labels, alpha):
                            ignore_index=-100, reduction="sum")
 
 
-def chunked_cross_entropy(x, weight, labels, alpha=1.0, chunk=8192):
+def _z_sum(logits, labels, z_loss, z_floor):
+    """The z-loss term over the labelled tokens of float32 logits: z_loss * log Z^2 (PaLM, arXiv 2204.02311), or with
+    z_floor * max(0, log Z - z_floor)^2, which leaves log Z alone below the floor and holds it there above."""
+    lse = torch.logsumexp(logits, dim=-1)
+    if z_floor is not None:
+        lse = (lse - z_floor).clamp(min=0)
+    return z_loss * (lse.square() * (labels != -100)).sum()
+
+
+def _ce_z_sum(x, weight, labels, alpha, z_loss, z_floor):
+    """_ce_sum plus the z-loss term: (CE sum, z sum)."""
+    logits = F.linear(x, weight)
+    if alpha != 1.0:
+        logits = logits * alpha
+    logits = logits.to(torch.promote_types(logits.dtype, torch.float32))
+    return (F.cross_entropy(logits, labels, ignore_index=-100, reduction="sum"),
+            _z_sum(logits, labels, z_loss, z_floor))
+
+
+def chunked_cross_entropy(x, weight, labels, alpha=1.0, chunk=8192, z_loss=0.0, z_floor=None):
     """Mean cross-entropy of the output head over the labelled tokens, without holding the (N, V)
     logits: chunks of `chunk` tokens, each recomputed in the backward pass. At 4 x 8,192 tokens and a
     64,000-token vocabulary the logits, their float32 copy and its gradient take ~20 GB; the
-    recomputation costs one more head matmul, about 3% of a step of the 990M model."""
+    recomputation costs one more head matmul, about 3% of a step of the 990M model.
+    With z_loss > 0 it returns (mean CE, mean z-loss term); with z_loss = 0 the path is the one without it."""
     x = x.reshape(-1, x.size(-1))
     labels = labels.reshape(-1)
-    total = None
+    n = (labels != -100).sum().clamp(min=1)
+    total = z_total = None
     for i in range(0, x.size(0), chunk):
-        part = torch.utils.checkpoint.checkpoint(_ce_sum, x[i:i + chunk], weight, labels[i:i + chunk],
-                                                 alpha, use_reentrant=False)
+        if z_loss:
+            part, z_part = torch.utils.checkpoint.checkpoint(_ce_z_sum, x[i:i + chunk], weight, labels[i:i + chunk],
+                                                             alpha, z_loss, z_floor, use_reentrant=False)
+            z_total = z_part if z_total is None else z_total + z_part
+        else:
+            part = torch.utils.checkpoint.checkpoint(_ce_sum, x[i:i + chunk], weight, labels[i:i + chunk],
+                                                     alpha, use_reentrant=False)
         total = part if total is None else total + part
-    return total / (labels != -100).sum().clamp(min=1)
+    return (total / n, z_total / n) if z_loss else total / n
 
 
 class Skylar2ForCausalLM(PreTrainedModel):
@@ -151,6 +177,8 @@ class Skylar2ForCausalLM(PreTrainedModel):
         # Divides lm_head output by width_mult so that logit magnitude
         # stays constant as model width grows. When µP is off, this is 1.0.
         self._mup_output_alpha = 1.0 / config.mup_width_mult
+        # z-loss on the output softmax, in training only (the trainer sets them, they are not in the config): 0 = off
+        self.z_loss, self.z_loss_floor = 0.0, None
 
         # ── Weight initialization ── v4|v5
         self.post_init()
@@ -412,11 +440,16 @@ class Skylar2ForCausalLM(PreTrainedModel):
                 f"document_ids for packed training.")
         x, x_pre, new_cache = self._trunk(input_ids, kv_cache=kv_cache, document_ids=document_ids,
                                           attention_mask=attention_mask, use_cache=use_cache)
-        loss = None
+        loss = z_term = None
         loss_parts = {}
+        z_on = bool(self.z_loss) and self.training and labels is not None
         if loss_only and labels is not None:
             logits = None
-            loss = chunked_cross_entropy(x, self.lm_head.weight, labels, self._mup_output_alpha)
+            if z_on:
+                loss, z_term = chunked_cross_entropy(x, self.lm_head.weight, labels, self._mup_output_alpha,
+                                                     z_loss=self.z_loss, z_floor=self.z_loss_floor)
+            else:
+                loss = chunked_cross_entropy(x, self.lm_head.weight, labels, self._mup_output_alpha)
         else:
             logits = self.lm_head(x)
             # µP: scale output logits to keep magnitude stable across widths
@@ -430,10 +463,17 @@ class Skylar2ForCausalLM(PreTrainedModel):
                     labels.view(-1),
                     ignore_index=-100,
                 )
+                if z_on:
+                    flat = labels.reshape(-1)
+                    z_term = _z_sum(logits.reshape(-1, logits.size(-1)).float(), flat, self.z_loss,
+                                    self.z_loss_floor) / (flat != -100).sum().clamp(min=1)
+            if z_term is not None:
+                loss_parts["ce"], loss_parts["z"] = loss.detach(), z_term.detach()
+                loss = loss + z_term
             if self.mtp is not None and len(self.mtp):
                 # `x_pre` e' lo stato PRIMA di ln_f: la testa MTP applica la sua
                 # normalizzazione, come nel trunk.
-                loss_parts["ce"] = loss.detach()
+                loss_parts.setdefault("ce", loss.detach())
                 aux, detail = self.mtp.loss(x_pre, self.token_emb, input_ids, labels,
                                             self.ln_f, self.lm_head)
                 if aux is not None:

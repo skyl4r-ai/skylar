@@ -56,6 +56,7 @@ import shutil
 import argparse
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from typing import Optional
 import torch
 import torch.nn.functional as F
@@ -72,13 +73,14 @@ from rich import box
 
 console = Console()
 
-# B200 Blackwell: cuDNN SDPA crashes on variable-length sequences
+# B200 Blackwell: cuDNN SDPA builds a new plan for every new sequence length (~2 s each with torch 2.10, and it crashed on
+# variable lengths with older versions), so it stays off. Flash and memory-efficient stay on: without them the math kernel
+# materializes the T x T scores (12 GiB per layer at 8K, ~790 GiB at 64K). Measured on a B200 with torch 2.10 + cu128:
+# flash at 64K tokens, causal, forward + backward 0.13 s and 2.6 GiB, the same bf16 error as math.
 if torch.cuda.is_available() and "B200" in torch.cuda.get_device_name(0):
     torch.backends.cuda.enable_cudnn_sdp(False)
-    torch.backends.cuda.enable_flash_sdp(False)
-    torch.backends.cuda.enable_mem_efficient_sdp(False)
     console.print(
-        f"  [yellow]⚠[/yellow] SDP backends disabled: cudnn={torch.backends.cuda.cudnn_sdp_enabled()}, flash={torch.backends.cuda.flash_sdp_enabled()}, mem={torch.backends.cuda.mem_efficient_sdp_enabled()}")
+        f"  [yellow]⚠[/yellow] SDP backends: cudnn={torch.backends.cuda.cudnn_sdp_enabled()}, flash={torch.backends.cuda.flash_sdp_enabled()}, mem={torch.backends.cuda.mem_efficient_sdp_enabled()}")
 
 from torch.utils.data import Dataset, DataLoader, Sampler
 from tokenizers import Tokenizer, decoders
@@ -90,6 +92,8 @@ _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 
 from models.decoder import Skylar2ForCausalLM
 from training.optim import OptimizerSet, build_optimizer
+from training.telemetry import NodeTelemetry
+import json as _json
 
 try:
     from accelerate import Accelerator
@@ -103,6 +107,11 @@ from utils.chatML import (
     load_dataset_jsonl,
     encode_chatml,
 )
+import hashlib
+import json
+import multiprocessing as mp
+import numpy as np
+import utils.chatML as _chatml_module
 
 # ─────────────────────────────────────────────────────────────
 # S3 CLIENT + ASYNC UPLOAD
@@ -257,7 +266,7 @@ class SFTDataset(Dataset):
       - SFT: loss ONLY on assistant responses (everything else is masked with -100)
     """
 
-    def __init__(self, examples, tokenizer, max_seq_len, overlong="tail_truncate"):
+    def __init__(self, examples, tokenizer, max_seq_len, overlong="tail_truncate", encoded=None):
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
         self.overlong = overlong
@@ -266,10 +275,13 @@ class SFTDataset(Dataset):
         skipped = 0
         truncated = 0
         dropped_long = 0
-        for ex in examples:
+        # encoded: the (token_ids, labels) of each example, already computed (encode_examples, in parallel)
+        pairs = encoded if encoded is not None else (create_loss_mask(ex["messages"], tokenizer) for ex in examples)
+        for token_ids, labels in pairs:
             # Token-based loss mask: tokenize each segment separately
             # for exact boundaries (no decode/re-encode approximation)
-            token_ids, labels = create_loss_mask(ex["messages"], tokenizer)
+            token_ids = np.asarray(token_ids, dtype=np.int64)
+            labels = np.asarray(labels, dtype=np.int64)
 
             # Shift per causal LM: logits[t] predice token_ids[t+1]
             token_ids = token_ids[:-1]
@@ -293,14 +305,56 @@ class SFTDataset(Dataset):
                 labels = labels[-max_seq_len:]
 
             # Only keep examples where we have at least some assistant tokens
-            if any(l != -100 for l in labels):
+            if (labels != -100).any():
                 self.samples.append({
-                    "input_ids": torch.tensor(token_ids, dtype=torch.long),
-                    "labels": torch.tensor(labels, dtype=torch.long),
+                    "input_ids": torch.from_numpy(np.ascontiguousarray(token_ids)),
+                    "labels": torch.from_numpy(np.ascontiguousarray(labels)),
                 })
             else:
                 skipped += 1
 
+        self.stats = {"skipped": skipped, "truncated": truncated, "dropped_long": dropped_long}
+        self._report()
+
+    @classmethod
+    def from_cache(cls, folder, tokenizer, max_seq_len, overlong):
+        """The samples of an earlier run with the same data, tokenizer, chat template, seq_len and overlong policy."""
+        ds = cls.__new__(cls)
+        ds.tokenizer, ds.max_seq_len, ds.overlong = tokenizer, max_seq_len, overlong
+        ids = np.load(os.path.join(folder, "input_ids.npy"), mmap_mode="r")
+        labels = np.load(os.path.join(folder, "labels.npy"), mmap_mode="r")
+        off = np.load(os.path.join(folder, "offsets.npy"))
+        ds.samples = [{"input_ids": torch.from_numpy(np.array(ids[a:b], dtype=np.int64)),
+                       "labels": torch.from_numpy(np.array(labels[a:b], dtype=np.int64))}
+                      for a, b in zip(off[:-1], off[1:])]
+        ds.stats = json.load(open(os.path.join(folder, "meta.json")))["stats"]
+        ds._report(" (from the tokenized cache)")
+        return ds
+
+    def save_cache(self, folder, meta):
+        """int32 arrays of all the samples back to back + their offsets; written in a temporary folder, then renamed."""
+        tmp = folder + ".tmp"
+        shutil.rmtree(tmp, ignore_errors=True)
+        os.makedirs(tmp)
+        off = np.zeros(len(self.samples) + 1, dtype=np.int64)
+        off[1:] = np.cumsum([s["input_ids"].numel() for s in self.samples])
+        for name in ("input_ids", "labels"):
+            arr = np.lib.format.open_memmap(os.path.join(tmp, f"{name}.npy"), mode="w+", dtype=np.int32, shape=(int(off[-1]),))
+            for i, smp in enumerate(self.samples):
+                arr[off[i]:off[i + 1]] = smp[name].numpy()
+            arr.flush()
+            del arr
+        np.save(os.path.join(tmp, "offsets.npy"), off)
+        json.dump(dict(meta, stats=self.stats, samples=len(self.samples), tokens=int(off[-1])),
+                  open(os.path.join(tmp, "meta.json"), "w"), indent=1)
+        shutil.rmtree(folder, ignore_errors=True)
+        os.rename(tmp, folder)
+
+    def _report(self, where=""):
+        skipped, truncated, dropped_long = (self.stats[k] for k in ("skipped", "truncated", "dropped_long"))
+        max_seq_len = self.max_seq_len
+        if where:
+            console.print(f"  [green]✓[/green] {len(self.samples)} examples{where}")
         if skipped > 0:
             console.print(f"  [yellow]⚠[/yellow] Skipped {skipped} examples (too short or no assistant content)")
         if truncated > 0:
@@ -313,6 +367,65 @@ class SFTDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.samples[idx]
+
+
+# ── Tokenized cache ──
+# The SFT tokenizes every conversation before the first step: on one core a large mix takes tens of minutes, and every
+# resume pays it again. --tokenize_workers spreads it over processes; --tokenized_cache DIR keeps
+# what SFTDataset builds (after the shift, the overlong policy and the assistant check) as int32 arrays, and the next run
+# with the same data file, tokenizer, chat-template code (utils/chatML.py), seq_len and overlong policy reads them back
+# without opening the JSONL. Like the pretrain's shards: tokenize once.
+_ENC_EXAMPLES = None
+_ENC_TOKENIZER = None
+
+
+def _enc_init(tokenizer_path):
+    global _ENC_TOKENIZER
+    _ENC_TOKENIZER = Tokenizer.from_file(tokenizer_path)
+
+
+def _enc_one(i):
+    ids, labels = create_loss_mask(_ENC_EXAMPLES[i]["messages"], _ENC_TOKENIZER)
+    return np.asarray(ids, dtype=np.int32), np.asarray(labels, dtype=np.int32)
+
+
+def encode_examples(examples, tokenizer, tokenizer_path, workers):
+    """(token_ids, labels) of every example, in order; with workers > 1 in forked processes that read the examples
+    inherited from this one (nothing to pickle on the way in) and send back int32 arrays."""
+    global _ENC_EXAMPLES
+    if workers <= 1 or len(examples) < 2 * workers:
+        return [create_loss_mask(ex["messages"], tokenizer) for ex in examples]
+    _ENC_EXAMPLES = examples
+    try:
+        with mp.get_context("fork").Pool(workers, initializer=_enc_init, initargs=(tokenizer_path,)) as pool:
+            return pool.map(_enc_one, range(len(examples)), chunksize=256)
+    finally:
+        _ENC_EXAMPLES = None
+
+
+def _file_sha256(path, block=1 << 24):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(block):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def tokenized_cache_dir(root, data_path, tokenizer_path, seq_len, overlong):
+    """The cache folder of one JSONL: a hash of everything that changes the samples."""
+    parts = {"data": _file_sha256(data_path), "tokenizer": _file_sha256(tokenizer_path),
+             "chatml": _file_sha256(_chatml_module.__file__), "seq_len": seq_len, "overlong": overlong,
+             "format": "sftdataset-int32-v1"}
+    key = hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()[:20]
+    return os.path.join(root, f"{os.path.basename(data_path).rsplit('.', 1)[0]}_{key}"), parts
+
+
+def resolve_tokenizer_path(args):
+    """The tokenizer the run will load (the same order as below: the resumed checkpoint, then the base model)."""
+    for d in (args.resume, args.base_model):
+        if d and os.path.exists(os.path.join(d, "tokenizer.json")):
+            return os.path.join(d, "tokenizer.json")
+    return None
 
 
 class EpochSampler(Sampler):
@@ -332,9 +445,83 @@ class EpochSampler(Sampler):
         return self.n - self.start
 
 
-def collate_fn(batch):
-    """Pad sequences to same length within a batch."""
+class LengthGroupedEpochSampler(EpochSampler):
+    """EpochSampler with the examples of each batch close in length (--group_by_length), so a batch pads to its own
+    longest example and not to a random one: the same permutation, cut into groups of `group` samples, each group
+    sorted by length (longest first). The method of transformers' LengthGroupedSampler (groups of 50 batches); the
+    batch size does not change, so neither does the loss. Same seed, epoch and `start` as EpochSampler: resumes exactly."""
+
+    def __init__(self, lengths, seed, group):
+        super().__init__(len(lengths), seed)
+        self.lengths, self.group = lengths, max(1, group)
+
+    def __iter__(self):
+        g = torch.Generator()
+        g.manual_seed(self.seed * 1_000_003 + self.epoch)
+        perm = torch.randperm(self.n, generator=g).tolist()
+        order = []
+        for i in range(0, self.n, self.group):
+            order += sorted(perm[i:i + self.group], key=lambda j: -self.lengths[j])
+        return iter(order[self.start:])
+
+
+class TokenBudgetBatchSampler(Sampler):
+    """Batches of whole examples within a token budget (--max_batch_tokens): many short examples together, a long one
+    alone, every batch padded to its longest example (rounded up to `multiple`) and never over `budget` tokens. With
+    examples from a few hundred to tens of thousands of tokens, a fixed number of rows per batch either runs out of
+    memory on the long ones or pads the short ones into waste. The batches are formed once, from groups of `group` examples of a seeded
+    permutation, each group sorted by length (as LengthGroupedEpochSampler), so their number is the same at every epoch
+    and a resumed run lands on the same batch; every epoch shuffles the order of the batches (seed, epoch). `start` skips
+    the batches of the epoch already trained. shuffle=False (validation): the examples in their order, consecutive ones
+    filling a batch, so the first batches are a fair sample. A batch's loss is the mean over its active tokens, and the
+    batches hold about the same number of tokens: per token, every example weighs about the same, long or short (a
+    fixed number of rows per batch weighs every row about the same instead)."""
+
+    def __init__(self, lengths, budget, multiple=1, seed=0, shuffle=True, group=2048):
+        pad = lambda n: -(-n // multiple) * multiple
+        too_long = [n for n in lengths if pad(n) > budget]
+        if too_long:
+            raise ValueError(f"{len(too_long)} examples longer than the budget ({max(too_long)} > {budget} tokens)")
+        if shuffle:
+            g = torch.Generator()
+            g.manual_seed(seed * 1_000_003)
+            perm = torch.randperm(len(lengths), generator=g).tolist()
+            order = []
+            for i in range(0, len(perm), group):
+                order += sorted(perm[i:i + group], key=lambda j: -lengths[j])
+        else:
+            order = list(range(len(lengths)))
+        self.batches, cur, width = [], [], 0
+        for i in order:
+            w = max(width, pad(lengths[i]))
+            if cur and w * (len(cur) + 1) > budget:
+                self.batches.append(cur)
+                cur, w = [], pad(lengths[i])
+            cur.append(i)
+            width = w
+        if cur:
+            self.batches.append(cur)
+        self.seed, self.shuffle, self.epoch, self.start = seed, shuffle, 0, 0
+
+    def __iter__(self):
+        if self.shuffle:
+            g = torch.Generator()
+            g.manual_seed(self.seed * 1_000_003 + 1 + self.epoch)
+            idx = torch.randperm(len(self.batches), generator=g).tolist()
+        else:
+            idx = range(len(self.batches))
+        return iter([self.batches[j] for j in idx][self.start:])
+
+    def __len__(self):
+        return len(self.batches) - self.start
+
+
+def collate_fn(batch, multiple=1):
+    """Pad sequences to same length within a batch, rounded up to `multiple`. On the hybrid the KDA kernels are
+    re-tuned for every new sequence length (about a second each, lost at every restart): padding to 128 leaves a
+    few dozen lengths. Right padding with label -100 leaves the loss of the real tokens unchanged (causal model)."""
     max_len = max(b["input_ids"].size(0) for b in batch)
+    max_len = -(-max_len // multiple) * multiple
 
     input_ids = torch.full((len(batch), max_len), 0, dtype=torch.long)  # pad with 0
     labels = torch.full((len(batch), max_len), -100, dtype=torch.long)  # -100 = ignore
@@ -494,13 +681,26 @@ def train_sft(args):
     # ── Data ──
     console.print()
     console.rule("[bold]Data[/bold]", style="dim")
-    if args.data and os.path.exists(args.data):
-        train_examples = load_dataset_jsonl(args.data)
-    else:
+    if not (args.data and os.path.exists(args.data)):
         exit("  No data file found, generating demo dataset...")
+    cache = {}
+    if args.tokenized_cache:
+        tok_path = resolve_tokenizer_path(args)
+        if not (args.val_data and os.path.exists(args.val_data)) or tok_path is None:
+            console.print("  [yellow]⚠[/yellow] --tokenized_cache needs --val_data and a tokenizer: not used")
+        else:
+            seq = min(args.seq_len, json.load(open(os.path.join(os.path.dirname(tok_path), "config.json"))).get(
+                "max_seq_len", args.seq_len)) if os.path.exists(os.path.join(os.path.dirname(tok_path), "config.json")) \
+                else args.seq_len
+            for name, path, ovl in (("train", args.data, args.overlong), ("val", args.val_data, "tail_truncate")):
+                cache[name] = tokenized_cache_dir(args.tokenized_cache, path, tok_path, seq, ovl)
+                hit = os.path.exists(os.path.join(cache[name][0], "meta.json"))
+                console.print(f"  tokenized cache {name}: {'[green]found[/green]' if hit else 'to build'} {cache[name][0]}")
+    hits = cache and all(os.path.exists(os.path.join(c[0], "meta.json")) for c in cache.values())
+    train_examples = None if hits else load_dataset_jsonl(args.data)
 
     if args.val_data and os.path.exists(args.val_data):
-        val_examples = load_dataset_jsonl(args.val_data)
+        val_examples = None if hits else load_dataset_jsonl(args.val_data)
     else:
         # Split 10% for validation
         split = max(1, len(train_examples) // 10)
@@ -600,8 +800,28 @@ def train_sft(args):
     console.rule("[bold]Datasets[/bold]", style="dim")
     sft_seq_len = min(args.seq_len, config.max_seq_len)
     console.print(f"  Preparing SFT datasets... (seq_len=[bold]{sft_seq_len}[/bold], model_ctx={config.max_seq_len})")
-    train_ds = SFTDataset(train_examples, tokenizer, sft_seq_len, overlong=args.overlong)
-    val_ds = SFTDataset(val_examples, tokenizer, sft_seq_len)   # val: always tail-truncate (don't drop val examples)
+    def build(name, examples, overlong):   # val: always tail-truncate (don't drop val examples)
+        folder, parts = cache.get(name, (None, None))
+        if parts and parts["seq_len"] != sft_seq_len:      # the key was computed before the model config was read
+            console.print(f"  [yellow]⚠[/yellow] tokenized cache {name} keyed on seq_len {parts['seq_len']}, "
+                          f"the run uses {sft_seq_len}: not used")
+            folder = None
+            if examples is None:
+                examples = load_dataset_jsonl(args.data if name == "train" else args.val_data)
+        if folder and os.path.exists(os.path.join(folder, "meta.json")):
+            return SFTDataset.from_cache(folder, tokenizer, sft_seq_len, overlong)
+        t0 = time.time()
+        enc = encode_examples(examples, tokenizer, tokenizer_path, args.tokenize_workers)
+        ds = SFTDataset(examples, tokenizer, sft_seq_len, overlong=overlong, encoded=enc)
+        console.print(f"  {name}: {len(ds)} examples tokenized in {time.time() - t0:.0f}s ({args.tokenize_workers} workers)")
+        if folder and (not use_accelerate or is_main):
+            ds.save_cache(folder, parts)
+            console.print(f"  [green]✓[/green] tokenized cache written: {folder}")
+        return ds
+
+    train_ds = build("train", train_examples, args.overlong)
+    val_ds = build("val", val_examples, "tail_truncate")
+    train_examples = val_examples = None
 
     data_table = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
     data_table.add_column(style="bold")
@@ -622,16 +842,38 @@ def train_sft(args):
 
     console.print(f"  ⚖️  im_end: {_n_ime}/{_n_train} ({_ime_ratio:.2%}) → boost=[bold]{_SPECIAL_BOOST:.1f}x[/bold]")
 
-    train_sampler = EpochSampler(len(train_ds), args.seed)
-    train_loader = DataLoader(
-        train_ds, batch_size=args.batch_size, sampler=train_sampler,
-        collate_fn=collate_fn, num_workers=0,
-        pin_memory=(device.type == "cuda"),
-    )
-    val_loader = DataLoader(
-        val_ds, batch_size=args.batch_size, shuffle=False,
-        collate_fn=collate_fn, num_workers=0,
-    )
+    if args.max_batch_tokens:
+        if use_accelerate:
+            raise SystemExit("--max_batch_tokens: one process only (no --multi_gpu)")
+        train_sampler = TokenBudgetBatchSampler([s["input_ids"].size(0) for s in train_ds.samples],
+                                                args.max_batch_tokens, args.pad_multiple, args.seed)
+        val_sampler = TokenBudgetBatchSampler([s["input_ids"].size(0) for s in val_ds.samples],
+                                              args.max_batch_tokens, args.pad_multiple, shuffle=False)
+    elif args.group_by_length:
+        world = accelerator.num_processes if use_accelerate else 1
+        train_sampler = LengthGroupedEpochSampler([s["input_ids"].size(0) for s in train_ds.samples], args.seed,
+                                                  50 * args.batch_size * world)
+    else:
+        train_sampler = EpochSampler(len(train_ds), args.seed)
+    if args.max_batch_tokens:
+        train_loader = DataLoader(
+            train_ds, batch_sampler=train_sampler, collate_fn=partial(collate_fn, multiple=args.pad_multiple),
+            num_workers=0, pin_memory=(device.type == "cuda"),
+        )
+        val_loader = DataLoader(
+            val_ds, batch_sampler=val_sampler, collate_fn=partial(collate_fn, multiple=args.pad_multiple),
+            num_workers=0,
+        )
+    else:
+        train_loader = DataLoader(
+            train_ds, batch_size=args.batch_size, sampler=train_sampler,
+            collate_fn=partial(collate_fn, multiple=args.pad_multiple), num_workers=0,
+            pin_memory=(device.type == "cuda"),
+        )
+        val_loader = DataLoader(
+            val_ds, batch_size=args.batch_size, shuffle=False,
+            collate_fn=partial(collate_fn, multiple=args.pad_multiple), num_workers=0,
+        )
 
     # ── Compute max_steps from epochs if specified ──
     # arxiv:2602.11149: multi-epoch on small dataset > single-epoch on large dataset
@@ -701,6 +943,13 @@ def train_sft(args):
     micro_step = 0  # singolo batch / micro-batch
     best_val_loss = float("inf")
     t0 = time.time()
+    # the run files of the pretrain trainer, same names and fields: train_steps.jsonl, metrics.jsonl, heartbeat.json,
+    # status.json and telemetry/. Tokens are the real ones (not padding: collate_fn pads with id 0, <pad>) and those
+    # with loss.
+    tokens_seen, loss_tokens_seen, train_loss = 0, 0, None
+    loss_acc = torch.zeros((), device=device)
+    tok_acc = torch.zeros((), dtype=torch.long, device=device)
+    ltok_acc = torch.zeros((), dtype=torch.long, device=device)
 
     min_lr = args.lr * 0.1
 
@@ -719,6 +968,8 @@ def train_sft(args):
             step = training_state.get("step", 0)  # optimizer step già completati
             micro_step = training_state.get("micro_step", step * args.grad_accum)
             best_val_loss = training_state.get("best_val_loss", float("inf"))
+            tokens_seen = training_state.get("tokens", 0)
+            loss_tokens_seen = training_state.get("loss_tokens", 0)
             if is_main:
                 console.print(
                     f"  [green]✓[/green] Resumed from optimizer step [bold]{step}[/bold] (micro_step={micro_step}, best_val={best_val_loss:.4f})")
@@ -733,9 +984,11 @@ def train_sft(args):
         train_cfg_table.add_column("Setting", style="bold")
         train_cfg_table.add_column("Value", style="white")
         train_cfg_table.add_row("Max steps", f"{args.max_steps:,}")
-        train_cfg_table.add_row("Batch size", str(args.batch_size))
+        train_cfg_table.add_row("Batch size", f"≤ {args.max_batch_tokens:,} tokens" if args.max_batch_tokens
+                                else str(args.batch_size))
         train_cfg_table.add_row("Grad accumulation", str(args.grad_accum))
-        train_cfg_table.add_row("Effective batch", str(args.batch_size * args.grad_accum))
+        train_cfg_table.add_row("Effective batch", f"≤ {args.max_batch_tokens * args.grad_accum:,} tokens"
+                                if args.max_batch_tokens else str(args.batch_size * args.grad_accum))
         train_cfg_table.add_row("Learning rate", f"{args.lr:.2e}")
         train_cfg_table.add_row("Warmup steps", str(args.warmup_steps))
         train_cfg_table.add_row("Schedule", schedule_info)
@@ -768,6 +1021,8 @@ def train_sft(args):
             "step": step,
             "micro_step": micro_step,
             "best_val_loss": best_val_loss,
+            "tokens": tokens_seen,
+            "loss_tokens": loss_tokens_seen,
         }, os.path.join(save_path, "training_state.pt"))
 
         label = "Best model" if is_best else "Checkpoint"
@@ -800,6 +1055,49 @@ def train_sft(args):
     del _ti, _tl, _to
     console.print(debug_table)
 
+    # ── the run files (rank 0): same names and fields as bin.pretrain.py, so the same tools read both runs ──
+    mon = Path(args.out_dir)
+    steps_fp = metrics_fp = telemetry = None
+    if is_main:
+        mon.mkdir(parents=True, exist_ok=True)
+        steps_fp, metrics_fp = open(mon / "train_steps.jsonl", "a"), open(mon / "metrics.jsonl", "a")
+        if torch.cuda.is_available():
+            telemetry = NodeTelemetry(mon, every_s=30).start()
+    world = accelerator.num_processes if use_accelerate else 1
+    run_t0, step0, tok0, last_hb = time.time(), step, tokens_seen, 0.0
+
+    def write_json_atomic(path, obj):
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(_json.dumps(obj))
+        os.replace(tmp, path)
+
+    def tok_s():
+        dt = time.time() - run_t0
+        return (tokens_seen - tok0) / dt if dt > 0 else None
+
+    def heartbeat(state):
+        if is_main:
+            write_json_atomic(mon / "heartbeat.json", {
+                "state": state, "step": step, "total_steps": args.max_steps, "tokens": tokens_seen,
+                "loss_tokens": loss_tokens_seen, "loss": train_loss, "tok_s": tok_s(), "t": round(time.time(), 1),
+                "job": "", "world": world})
+
+    def write_status(state, **extra):
+        if is_main:
+            write_json_atomic(mon / "status.json", {
+                "state": state, "step": step, "total_steps": args.max_steps, "tokens": tokens_seen,
+                "t": round(time.time(), 1), "job": "", "world": world, **extra})
+
+    _prev_hook = sys.excepthook
+
+    def _crash_hook(t, e, tb):           # an uncaught error or Ctrl-C: status.json says so instead of a stale heartbeat
+        write_status("interrupted" if issubclass(t, KeyboardInterrupt) else "crashed",
+                     error=f"{t.__name__}: {str(e)[:300]}")
+        _prev_hook(t, e, tb)
+
+    sys.excepthook = _crash_hook
+    heartbeat("starting")
+
     # ── Training progress bar ──
     train_progress = _make_train_progress(console)
     train_progress.start()
@@ -811,7 +1109,7 @@ def train_sft(args):
     while step < args.max_steps:
         # where this epoch starts: 0 normally, the first batch not yet trained after a resume
         train_sampler.epoch, skip = divmod(micro_step, batches_per_epoch)
-        train_sampler.start = skip * samples_per_micro
+        train_sampler.start = skip if args.max_batch_tokens else skip * samples_per_micro
         for input_ids, labels in train_loader:
             if step >= args.max_steps:
                 break
@@ -871,6 +1169,10 @@ def train_sft(args):
                     console.print(
                         f"  [dim]TRACE micro={micro_step}: loss={raw:.4f}, nan_grad={has_nan_grad}, nan_param={has_nan_param}[/dim]")
 
+            loss_acc += loss.detach()            # sum over the accumulation of loss / grad_accum = the step's mean loss
+            tok_acc += (input_ids != 0).sum()
+            ltok_acc += (labels != -100).sum()
+
             micro_step += 1
             do_update = (micro_step % args.grad_accum == 0)
 
@@ -889,6 +1191,20 @@ def train_sft(args):
 
                 # Ora incrementiamo lo step "vero"
                 step += 1
+                train_loss = loss_acc.item()
+                tokens_seen += int(tok_acc.item()) * world
+                loss_tokens_seen += int(ltok_acc.item()) * world
+                loss_acc.zero_(); tok_acc.zero_(); ltok_acc.zero_()
+                if is_main:
+                    if step % args.log_every == 0:
+                        gn_v = last_grad_norm.item() if torch.is_tensor(last_grad_norm) else last_grad_norm
+                        steps_fp.write(_json.dumps({"step": step, "tokens": tokens_seen, "loss_tokens": loss_tokens_seen,
+                                                    "lr": lr, "train_loss": train_loss, "grad_norm": gn_v,
+                                                    "t": round(time.time(), 3)}) + "\n")
+                        steps_fp.flush()
+                    if time.time() - last_hb >= 30:
+                        heartbeat("train")
+                        last_hb = time.time()
 
                 # ── Logging (su optimizer-step) ──
                 if step % args.log_every == 0 and is_main:
@@ -931,6 +1247,13 @@ def train_sft(args):
                     train_progress.stop()
                     val_loss = evaluate(unwrap_model(), val_loader, device, dtype=dtype)
                     console.print(f"  ✦ val_loss: [bold magenta]{val_loss:.4f}[/bold magenta]")
+                    el = time.time() - run_t0
+                    metrics_fp.write(_json.dumps({
+                        "step": step, "tokens": tokens_seen, "loss_tokens": loss_tokens_seen, "lr": lr,
+                        "train_loss": train_loss, "val_loss": val_loss, "tok_s": tok_s(),
+                        "eta_h": (args.max_steps - step) * el / max(1, step - step0) / 3600,
+                        "t": round(time.time(), 1)}) + "\n")
+                    metrics_fp.flush()
 
                     if args.wandb:
                         import wandb
@@ -991,6 +1314,10 @@ def train_sft(args):
     if is_main:
         total_time = time.time() - t0
         save_checkpoint("final")
+        write_status("done", best_val=best_val_loss)
+        heartbeat("done")
+        if telemetry is not None:
+            telemetry.stop()
 
         final_table = Table(box=box.DOUBLE_EDGE, border_style="green", title="✅ SFT Complete", title_style="bold green")
         final_table.add_column("Metric", style="bold")
@@ -1090,11 +1417,25 @@ def main():
                         help="Use torch.compile() for faster training (CUDA only)")
     parser.add_argument("--gradient_checkpointing", action="store_true",
                         help="Trade compute for VRAM — reduces activation memory from O(n_layers) to O(sqrt(n_layers))")
+    parser.add_argument("--max_batch_tokens", type=int, default=0,
+                        help="batches by a token budget instead of --batch_size rows: as many whole examples as fit in "
+                             "this many (padded) tokens, a long one alone; one process only")
+    parser.add_argument("--group_by_length", action="store_true",
+                        help="batches of examples close in length (groups of 50 batches sorted by length): less padding "
+                             "with --batch_size > 1, same loss")
+    parser.add_argument("--pad_multiple", type=int, default=1,
+                        help="pad each batch to a multiple of this length: 128 on the hybrid (Skylar 2), whose KDA "
+                             "kernels are re-tuned for every new sequence length")
     parser.add_argument("--multi_gpu", action="store_true",
                         help="Use HuggingFace Accelerate for multi-GPU training (requires: pip install accelerate)")
 
     # System
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--tokenize_workers", type=int, default=1,
+                        help="processes for the tokenization of the dataset (1 = in this process, as before)")
+    parser.add_argument("--tokenized_cache", default=None,
+                        help="folder for the tokenized samples: written the first time, read back by the next run with "
+                             "the same data, tokenizer, chat template, seq_len and overlong policy (needs --val_data)")
 
     args = parser.parse_args()
     train_sft(args)

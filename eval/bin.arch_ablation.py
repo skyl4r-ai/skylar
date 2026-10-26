@@ -20,10 +20,9 @@ Variants (all on the Skylar 2 hybrid: KDA 3:1, per-head output gate, SiTU-GLU, d
     block_gn   block AttnRes + gated normalisation (rank 16)
     muon:<v>   variant <v> trained with Muon instead of AdamW
 Default proxy: 36 layers, width 512, 4/2 heads of 128, FFN 1408 (the depth and layout of the 990M).
-Optional: --bpb_set <dir of .txt slices> adds bits-per-byte (eval/bin.bits_per_byte.py).
+Optional: --bpb_set <dir of .txt slices> adds bits-per-byte (eval/bpb.py).
 """
 import argparse
-import importlib.util
 import json
 import math
 import os
@@ -89,13 +88,11 @@ def evaluate(args, ckpt):
             tot += model(input_ids=x, labels=y, document_ids=doc)["loss"].item()
     res = {"val_ce_fixed": tot / args.val_batches, "params": sum(p.numel() for p in model.parameters())}
     if args.bpb_set:
-        spec = importlib.util.spec_from_file_location("bpb", REPO / "eval/bin.bits_per_byte.py")
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
+        from eval.bpb import bits_per_byte
         bpb = {}
         with torch.autocast("cuda", dtype=torch.bfloat16):
             for path in sorted(Path(args.bpb_set).glob("*.txt")):
-                r = mod.bits_per_byte(model, tok, path.read_text(), "cuda", seq_len=args.seq_len)
+                r = bits_per_byte(model, tok, path.read_text(), "cuda", seq_len=args.seq_len)
                 if r:
                     bpb[path.stem] = r["bpb"]
         res["bpb"] = bpb

@@ -72,6 +72,7 @@ flow from one packed document into the next, so the trainer refuses to start.
 | telemetry | `metrics.jsonl`, `train_steps.jsonl`, `status.json`, `heartbeat.json`; GPU power and energy from NVML (`--telemetry_s`); bits per byte on a set of frozen texts (`--bpb_set`); the model's continuation of fixed prompts (`--samples_prompts`); optional W&B (`--wandb`) |
 | long runs | `--deadline` and SIGTERM/SIGUSR1 save `last` and exit cleanly; `--ckpt_every_min`; a non-finite gradient skips the update and `--max_nonfinite` stops the run without overwriting `last`; `--skip_tokens_at` resumes from an earlier checkpoint and steps over the data that followed it |
 | optimiser | `--wd` on the matrices; `--wd_embed` for the token embedding |
+| output logits | optional z-loss on the softmax (`--z_loss C`: C · log Z² per labelled token; `--z_loss_floor F`: only above log Z = F; 0 = off); each evaluation logs the largest logit, log Z, and the mean and spread of the logits |
 | validation | a fixed set per data folder (`--val_windows`), the same for any number of GPUs |
 
 ### More than one GPU
@@ -123,6 +124,27 @@ python training/bin.sft.py --base_model <pretrained_dir> --data sft_train.jsonl 
 | feature | detail |
 |:--|:--|
 | format | ChatML (`<\|im_start\|>role … <\|im_end\|>`) |
-| loss mask | only assistant tokens and the closing `<\|im_end\|>` carry gradient |
+| loss mask | only assistant tokens and the closing `<\|im_end\|>` carry gradient; an assistant message with `"train": false` stays in the context without loss |
 | stopping | extra weight on `<\|im_end\|>`, so the model learns to end its turn |
 | optimiser | AdamW or Muon (`--optimizer`) |
+| batches | `--batch_size` rows, or `--max_batch_tokens N`: as many whole examples as fit in N padded tokens, a long one alone (one process); `--group_by_length` puts examples of similar length together (less padding, same loss); `--pad_multiple` rounds batch lengths up, so length-specialised kernels (the KDA ones of the hybrid) are not re-tuned for every new length |
+| tokenization | `--tokenize_workers` tokenizes the dataset in parallel; `--tokenized_cache DIR` keeps the tokenized samples, and the next run with the same data, tokenizer, chat template, `--seq_len` and `--overlong` policy reads them back (needs `--val_data`) |
+| telemetry | the pre-training's run files: `train_steps.jsonl`, `metrics.jsonl`, `heartbeat.json`, `status.json` (also on a crash or Ctrl-C), GPU telemetry |
+| hardware | on B200 the cuDNN attention backend is off (it builds a new plan for every sequence length); flash and memory-efficient attention stay on |
+
+## Reinforcement learning
+
+[`grpo.py`](grpo.py) and [`rft.py`](rft.py) take the reward and the prompt builder from the caller, so the same
+loop serves any verifiable task:
+
+```python
+from training.grpo import grpo_train, GRPOConfig
+grpo_train(model, tok, records, reward_fn, build_prompt,
+           GRPOConfig(steps=<n>, group=<k>, grad_ckpt=True, bf16=True, save_every=<m>, out_dir="runs/grpo"))
+```
+
+| feature | detail |
+|:--|:--|
+| memory | `grad_ckpt` recomputes the policy's forward in the backward (needs dropout 0); with `bf16` on CUDA the reference model is kept in bf16; `pad_multiple` as in SFT |
+| long runs | `save_every` + `out_dir` write `<out_dir>/last` (policy, optimiser, step, random state); `grpo_train(..., resume_dir=<out_dir>/last)` continues from it |
+| log | per step: mean reward, pass rate, loss, and the time spent in generation and in the reward |

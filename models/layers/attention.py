@@ -93,7 +93,9 @@ def create_document_block_mask(document_ids, n_heads, device=None):
         same_doc = document_ids[b, q_idx] == document_ids[b, kv_idx]
         return causal & same_doc
 
-    return create_block_mask(mask_mod, B=B, H=None, Q_LEN=T, KV_LEN=T, device=device)
+    # _compile=True: the eager path builds the dense T x T mask before compressing it (2.5 GiB at 16K, OOM at 64K on a
+    # 64 GB GPU); compiled, it is the same BlockMask (checked equal at 8K and 16K) in ~0.1 GiB at any length.
+    return create_block_mask(mask_mod, B=B, H=None, Q_LEN=T, KV_LEN=T, device=device, _compile=True)
 
 
 @torch.compiler.disable
