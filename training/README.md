@@ -146,6 +146,6 @@ grpo_train(model, tok, records, reward_fn, build_prompt,
 
 | feature | detail |
 |:--|:--|
-| memory | `grad_ckpt` recomputes the policy's forward in the backward (needs dropout 0); with `bf16` on CUDA the reference model is kept in bf16; `pad_multiple` as in SFT |
+| memory | `grad_ckpt` recomputes the policy's forward in the backward (needs dropout 0); with `bf16` on CUDA the reference model is kept in bf16; `pad_multiple` as in SFT; on a Skylar2 model the log-probs go through the chunked head, so the logits of a long prompt are never held |
 | long runs | `save_every` + `out_dir` write `<out_dir>/last` (policy, optimiser, step, random state); `grpo_train(..., resume_dir=<out_dir>/last)` continues from it |
 | log | per step: mean reward, pass rate, loss, and the time spent in generation and in the reward |

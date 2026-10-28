@@ -65,9 +65,20 @@ def seq_logp(model, ids_1xT, prompt_len, pad_multiple=1):
     rows of the logits go to fp32. Right padding to `pad_multiple` leaves them unchanged (causal model)."""
     T = ids_1xT.shape[1]
     Tp = -(-T // pad_multiple) * pad_multiple
-    out = model(F.pad(ids_1xT, (0, Tp - T)) if Tp > T else ids_1xT)
+    padded = F.pad(ids_1xT, (0, Tp - T)) if Tp > T else ids_1xT
+    tgt = ids_1xT[0, prompt_len:]
+    if hasattr(model, "_trunk") and hasattr(model, "_mup_output_alpha"):
+        # Skylar2: the head reads only the completion's rows, in checkpointed chunks (the decoder's chunked_cross_entropy):
+        # the (T, V) logits of a long prompt are never held (with prompts of a few thousand tokens the full-logits path
+        # below ran a 24 GB card out of memory).
+        from models.decoder import chunked_cross_entropy
+        x = model._trunk(padded)[0][0, prompt_len - 1:T - 1]
+        if tgt.numel() == 0:
+            return x.sum() * 0.0
+        return -chunked_cross_entropy(x, model.lm_head.weight, tgt, model._mup_output_alpha, chunk=1024)
+    out = model(padded)
     logits = (out["logits"] if isinstance(out, dict) else out.logits)[0, prompt_len - 1:T - 1, :].float()
-    tgt = ids_1xT[0, prompt_len:]                 # the rows above predict positions prompt_len..T-1
+    # the rows above predict positions prompt_len..T-1
     if tgt.numel() == 0:
         return logits.sum() * 0.0
     return -F.cross_entropy(logits, tgt)
