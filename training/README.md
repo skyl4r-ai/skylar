@@ -65,6 +65,7 @@ flow from one packed document into the next, so the trainer refuses to start.
 | feature | flags |
 |:--|:--|
 | data | memory-mapped shards with SHA-256 checksums; sampler without repeats (`--sampler permutation`); several tokenized folders with weights (`--data_mix`); best-fit packed windows (`--pack keep|drop`, [`data/`](../data/README.md)) |
+| chained runs | `--sampler_state <checkpoint>`: a run started with `--init_from` continues the data of an earlier run (every folder goes on with its shuffled passes, a new folder starts at its first window); every save writes a small `sampler_state.json` for it. A full checkpoint given to `--init_from` without it is refused, since its folders would be read again from the first window (`--sampler_fresh_ok` accepts that) |
 | schedules | `--lr_schedule cosine`, `wsd` (warmup-stable-decay), `constant` |
 | checkpoint merge | with `--lr_schedule constant`, weight-only snapshots every `--wsm_every_tok` tokens or inside `--wsm_window START:END:EVERY`, then `bin.merge_wsm.py` |
 | memory | loss computed in chunks, so the full logits never exist at once; activation checkpointing (`--grad_ckpt`) |

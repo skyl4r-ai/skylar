@@ -273,6 +273,9 @@ def save_ckpt(path, raw_model, opt, step, tokens_seen, args, best_val, ds=None, 
         except Exception:
             pass
     torch.save(state, tmp / "training_state.pt")
+    if data_state:   # small: what a later run needs to continue this one's data (--sampler_state), without the optimizer
+        (tmp / "sampler_state.json").write_text(json.dumps(
+            {**{k: data_state[k] for k in SAMPLER_KEYS if k in data_state}, "seed": args.seed}, default=int))
     # what a launcher needs without loading the optimizer state (GBs): where this checkpoint is
     (tmp / "progress.json").write_text(json.dumps({"step": step, "tokens": tokens_seen, "t": round(time.time(), 1)}))
     bak = _prev_name(path, 1)
@@ -466,6 +469,100 @@ def folder_id(path):
         if f.is_file():
             h.update(f.read_bytes())
     return h.hexdigest()[:16]
+
+
+# the data state a later run needs to continue this one's (--sampler_state), saved with every checkpoint as sampler_state.json
+SAMPLER_KEYS = ("data_fp", "samples_done", "seq_len", "pack", "mix_ids", "mix_state")
+
+
+def load_sampler_state(path):
+    """The data state of a checkpoint (samples read, mix state, folder ids, seq_len, packing, seed) from its
+    sampler_state.json, or from its training_state.pt memory-mapped (the optimizer state is not read). None if
+    it has neither."""
+    p = Path(path)
+    if p.is_dir():
+        p = next((p / n for n in ("sampler_state.json", "training_state.pt") if (p / n).is_file()), None)
+    if p is None or not p.is_file():
+        return None
+    if p.suffix == ".json":
+        return json.loads(p.read_text())
+    st = torch.load(p, map_location="cpu", weights_only=False, mmap=True)
+    old_args = st.get("args") or {}
+    out = {k: st[k] for k in SAMPLER_KEYS if k in st}
+    out.setdefault("seq_len", old_args.get("seq_len"))
+    out.setdefault("pack", old_args.get("pack", "off"))
+    out["seed"] = old_args.get("seed")
+    return out
+
+
+def carry_sampler_state(args, ds, sources, data_fp, is_main):
+    """Where a run from --init_from starts its data: (samples_done, old mix state, folders to start again).
+
+    Every run used to start each folder at the first window of the same permutation (seed + folder name), so the
+    next stage of a chain, with the same folders, read the windows of the stage before again (28/10/2026). With
+    --sampler_state the earlier run's position is carried: every folder continues its shuffled passes, a folder with
+    another weight too, a new folder starts at 0. Without it, a sampler state in the --init_from dir is refused, as
+    is a state that cannot be continued (another seq_len, packing or seed, a folder whose content changed): the
+    windows would be read again. --sampler_fresh_ok accepts that explicitly."""
+    src = args.sampler_state or args.init_from
+    prev = load_sampler_state(src) if src else None
+    if prev is None:
+        if args.sampler_state:
+            raise SystemExit(f"--sampler_state {args.sampler_state}: no sampler_state.json or training_state.pt there")
+        return 0, None, []
+    done = prev.get("samples_done")
+    if done is None:
+        if args.sampler_state:
+            raise SystemExit(f"--sampler_state {src}: the checkpoint does not record the samples it read")
+        if is_main:
+            print(f"[sampler] {src} does not record the samples it read: the data starts at the first window",
+                  flush=True)
+        return 0, None, []
+    done = int(done)
+    if args.data_mix:
+        names = ds.names
+        windows = {n: p.n_windows("train") for n, p in zip(names, ds.parts)}
+        read = MixtureTokenDataset.given_by(prev["mix_state"], done) if prev.get("mix_state") else {}
+        ids_now = {Path(p).name: folder_id(p) for p, _ in sources}
+        ids_old = prev.get("mix_ids") or {}
+        changed = [n for n in names if read.get(n, 0) and n in ids_old and ids_old[n] != ids_now[n]]
+    else:
+        names = [Path(args.data).name]
+        windows = {names[0]: ds.n_windows("train")}
+        same = not prev.get("mix_state") and prev.get("data_fp") == data_fp
+        read, changed = ({names[0]: done} if same else {}), []
+    other = [f"{k} {prev.get(k)} -> {v}" for k, v in (("seed", args.seed), ("seq_len", args.seq_len),
+                                                     ("pack", args.pack)) if prev.get(k) != v]
+    lost = [n for n in names if read.get(n, 0)] if (other or not args.sampler_state) else changed
+    if lost and not args.sampler_fresh_ok:
+        why = (f"{', '.join(other)}: other windows" if other else
+               f"their content changed since then ({', '.join(lost)})" if args.sampler_state else
+               f"pass --sampler_state {src} to continue them")
+        raise SystemExit(f"[sampler] {src} read {', '.join(f'{n} {read[n]:,}' for n in lost)} windows: this run would "
+                         f"start them again from the first window ({why}). --sampler_fresh_ok to accept it")
+    if other or not args.sampler_state or not read:      # nothing carried: every folder from its first window
+        if is_main and lost:
+            print(f"[sampler] --sampler_fresh_ok: {', '.join(lost)} start again from the first window although "
+                  f"{src} read them", flush=True)
+        elif is_main and args.sampler_state:
+            print(f"[sampler] {src} read none of these folders: every folder starts at its first window", flush=True)
+        return 0, None, []
+    if is_main:
+        for n in names:
+            g, w = read.get(n, 0), windows[n]
+            if n in changed:
+                print(f"[sampler] {n}: content changed since {src} (--sampler_fresh_ok): starts again at its first "
+                      f"window ({w:,} windows)", flush=True)
+            elif g:
+                print(f"[sampler] {n}: {g:,} windows already read / {w:,} (pass {g // w + 1}, {g % w / w:.1%} of it): "
+                      f"continues at window {g + 1:,} of its shuffled passes"
+                      + (" (%s #%d)" % ds.window_id(n, g, args.seed) if args.data_mix else ""), flush=True)
+            else:
+                print(f"[sampler] {n}: not read before, starts at its first window ({w:,} windows"
+                      + (", %s #%d)" % ds.window_id(n, 0, args.seed) if args.data_mix else ")"), flush=True)
+        for n in [n for n in read if n not in names]:
+            print(f"[sampler] {n}: {read[n]:,} windows read by {src}, not in this run", flush=True)
+    return done, prev.get("mix_state"), changed
 
 
 # config keys that may change at a resume: the rest must match the checkpoint, or the same weights compute another
@@ -774,6 +871,16 @@ def main():
                     help="after a loss spike: when resuming from the checkpoint of step STEP (e.g. a milestone before "
                          "the spike), skip TOKENS of data (e.g. 41000:0.6e9). Only from that checkpoint, so it is "
                          "safe to leave in a launch script")
+    ap.add_argument("--sampler_state", default=None, metavar="CHECKPOINT",
+                    help="a run from --init_from that continues the data of an earlier run (the next stage of a chain): "
+                         "that run's checkpoint dir, or its sampler_state.json / training_state.pt. With the same --seed, "
+                         "--seq_len and --pack every folder goes on with its shuffled passes where that run left it, so "
+                         "no window is read again before its pass ends; a folder with another weight goes on too, a new "
+                         "folder starts at its first window. Ignored on a resume (the checkpoint's own state is used)")
+    ap.add_argument("--sampler_fresh_ok", action="store_true",
+                    help="start folders from their first window although a sampler state says they were read: one in the "
+                         "--init_from dir, a --sampler_state with another --seq_len/--pack/--seed, or a folder whose "
+                         "content changed. Refused by default: the run would read the same windows again")
     ap.add_argument("--init_from", default=None,
                     help="start from these weights, e.g. a model grown with training/bin.upscale.py (beta): its "
                          "config.json sets the architecture (--preset and the architecture flags are ignored), the "
@@ -1083,13 +1190,21 @@ def main():
         elif is_main:
             print(f"[resume] --skip_tokens_at {args.skip_tokens_at}: this checkpoint is of step "
                   f"{resume_state.get('step')}, nothing skipped", flush=True)
+    carried_mix, carried_reset = None, []
+    if resume_state is None and args.sampler == "permutation" and (args.sampler_state or args.init_from):
+        samples_done, carried_mix, carried_reset = carry_sampler_state(args, ds, sources, data_fp, is_main)
+    elif args.sampler_state and is_main:
+        print(f"[sampler] --sampler_state {args.sampler_state}: "
+              + ("a resume, the checkpoint's own sampler state is used" if resume_state is not None
+                 else "the random sampler has no passes to continue"), flush=True)
     data_state = {"data_fp": data_fp, "data_start_step": data_start_step, "samples_done": samples_done,
                   "tok_per_step": tok_per_step, "seq_len": args.seq_len, "pack": args.pack}
     if args.data_mix:
         data_state["mix_ids"] = {Path(p).name: folder_id(p) for p, _ in sources}
-        # weights changed since the checkpoint -> every folder's base moves to what it has given
-        old_mix = resume_state.get("mix_state") if resume_state is not None and samples_done else None
-        data_state["mix_state"] = ds.restate(old_mix, samples_done)
+        # weights changed since the checkpoint (or the run --sampler_state continues) -> every folder's base moves to
+        # what it has given
+        old_mix = resume_state.get("mix_state") if resume_state is not None and samples_done else carried_mix
+        data_state["mix_state"] = ds.restate(old_mix, samples_done, reset=carried_reset)
     if not args.steps:
         total_steps = min(total_steps, data_start_step + max(1, int(corpus_tok * args.max_epochs / tok_per_step)))
     implied_epochs = (total_steps - data_start_step) * tok_per_step / max(1, corpus_tok)

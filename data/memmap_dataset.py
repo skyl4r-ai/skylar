@@ -381,25 +381,32 @@ class MixtureTokenDataset:
         assert (given == q).all()
         return q, src, local, prefix
 
-    def restate(self, old, samples_done):
+    @staticmethod
+    def given_by(old, samples_done):
+        """{folder: samples it had given} after `samples_done` samples of a run whose mix state was `old` (a
+        checkpoint's `mix_state`): where each folder's shuffled passes stood."""
+        names = list(old["quota"])
+        q = np.array([old["quota"][n] for n in names], dtype=np.int64)
+        _, _, _, prefix = MixtureTokenDataset._pattern(q / q.sum(), old["block"])
+        b, r = divmod(samples_done - old["k0"], old["block"])
+        return {n: old["base"][n] + b * int(q[i]) + int(prefix[r][i]) for i, n in enumerate(names)}
+
+    def restate(self, old, samples_done, reset=()):
         """The state for these weights from a checkpoint's `old` state, at `samples_done` samples since the
-        data started: the same if nothing changed, otherwise every folder's base moves to what it has given."""
+        data started: the same if nothing changed, otherwise every folder's base moves to what it has given.
+        The folders in `reset` start again from their first window (their content changed)."""
         if old is None:
             return self.state
         # The same folders IN THE SAME ORDER: the pattern's tie-breaking follows the order, so the same quotas listed
         # in another order put other folders at the same positions of the block (a dict comparison ignored that: one
         # sample read twice and one skipped per folder at the resume). Any other order rebases, as for new weights.
-        if old.get("block") == self.block and list(old.get("quota", {}).items()) == list(zip(self.names,
-                                                                                            self.quota.tolist())):
+        if not reset and old.get("block") == self.block and list(old.get("quota", {}).items()) == list(
+                zip(self.names, self.quota.tolist())):
             self.state = old
             return old
-        names = list(old["quota"])
-        q = np.array([old["quota"][n] for n in names], dtype=np.int64)
-        _, _, _, prefix = self._pattern(q / q.sum(), old["block"])
-        b, r = divmod(samples_done - old["k0"], old["block"])
-        given = {n: old["base"][n] + b * int(q[i]) + int(prefix[r][i]) for i, n in enumerate(names)}
-        self.state = {"k0": samples_done, "base": {n: given.get(n, 0) for n in self.names}, "block": self.block,
-                      "quota": dict(zip(self.names, self.quota.tolist()))}
+        given = self.given_by(old, samples_done)
+        self.state = {"k0": samples_done, "base": {n: 0 if n in reset else given.get(n, 0) for n in self.names},
+                      "block": self.block, "quota": dict(zip(self.names, self.quota.tolist()))}
         return self.state
 
     def locate(self, k):
@@ -414,6 +421,12 @@ class MixtureTokenDataset:
         b, r = divmod(k - self.state["k0"], self.block)
         return {n: self.state["base"][n] + b * int(self.quota[i]) + int(self._prefix[r][i])
                 for i, n in enumerate(self.names)}
+
+    def window_id(self, folder, i, seed=0):
+        """(shard file, window inside it) that sample i of a folder's shuffled passes reads with `get_batch_at`'s seed:
+        an id to check in a log which windows a run read."""
+        shard, w = self.parts[self.names.index(folder)]._locate("train", i, _mix64(seed ^ _name_key(folder)))
+        return Path(shard.path).name, int(w)
 
     def passes(self, k, split="train"):
         """{folder: passes over its windows} after the first k samples: how much each folder is repeated."""
